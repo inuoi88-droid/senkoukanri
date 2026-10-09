@@ -365,8 +365,11 @@ function getConnectInfo() {
   };
 }
 
-/** ダイアログから呼ばれる。ウェブアプリを実際に呼び出して確かめてから URL を保存する。 */
-function saveWebAppUrl(url) {
+/**
+ * ダイアログから呼ばれる。ウェブアプリを実際に呼び出して確かめてから URL を保存する。
+ * skipCheck が true なら確認せずに保存する（確認自体がうまくいかないときの逃げ道）。
+ */
+function saveWebAppUrl(url, skipCheck) {
   url = String(url || '').trim().replace(/[?#].*$/, '');
   if (/\/dev$/.test(url)) {
     throw new Error('末尾が「/dev」の URL はテスト用です。「デプロイ → デプロイを管理」に表示される、末尾が「/exec」の URL を貼り付けてください。');
@@ -374,10 +377,42 @@ function saveWebAppUrl(url) {
   if (!/^https:\/\/script\.google\.com\/(a\/[^\/]+\/)?macros\/s\/[\w-]+\/exec$/.test(url)) {
     throw new Error('「https://script.google.com/macros/s/…/exec」の形式の URL を貼り付けてください。');
   }
-  var problem = diagnoseWebApp_(url);
-  if (problem) throw new Error(problem);
+  if (!skipCheck) {
+    var problem = diagnoseWebApp_(url);
+    if (problem) throw new Error(problem);
+  }
   PropertiesService.getScriptProperties().setProperty('WEBAPP_URL', url);
   return url;
+}
+
+/**
+ * スマホのブラウザと同じ手順でウェブアプリを呼び出す。
+ * POST → 302 リダイレクト → 移動先を GET（ブラウザは 302 の移動先を GET で取りに行く）。
+ * 自動リダイレクトに任せると POST のまま移動先に送られて失敗することがあるので、1 段ずつたどる。
+ */
+function callWebAppLikeBrowser_(url, body) {
+  var trace = [];
+  var res = UrlFetchApp.fetch(url, {
+    method: 'post',
+    contentType: 'text/plain;charset=utf-8',
+    payload: JSON.stringify(body),
+    followRedirects: false,
+    muteHttpExceptions: true
+  });
+  trace.push('POST ' + res.getResponseCode());
+  for (var i = 0; i < 5; i++) {
+    var code = res.getResponseCode();
+    if (code < 300 || code >= 400) break;
+    var headers = res.getHeaders() || {};
+    var loc = headers.Location || headers.location || '';
+    if (!loc) break;
+    var host = (String(loc).match(/^https?:\/\/([^\/?#]+)/) || [])[1] || loc;
+    trace.push('→ ' + host);
+    if (/accounts\.google\.com/.test(host)) return { login: true, trace: trace.join(' ') };
+    res = UrlFetchApp.fetch(loc, { followRedirects: false, muteHttpExceptions: true });
+    trace.push('GET ' + res.getResponseCode());
+  }
+  return { res: res, trace: trace.join(' ') };
 }
 
 /**
@@ -385,37 +420,44 @@ function saveWebAppUrl(url) {
  * 問題が無ければ空文字。
  */
 function diagnoseWebApp_(url) {
-  var res;
+  var token = PropertiesService.getScriptProperties().getProperty('API_TOKEN');
+  var r;
   try {
-    res = UrlFetchApp.fetch(url, {
-      method: 'post',
-      contentType: 'text/plain;charset=utf-8',
-      payload: JSON.stringify({ action: 'ping' }),
-      followRedirects: true,
-      muteHttpExceptions: true
-    });
+    r = callWebAppLikeBrowser_(url, { action: 'data', token: token });
   } catch (e) {
     return 'ウェブアプリを呼び出せませんでした: ' + e.message;
   }
-  var code = res.getResponseCode();
-  var text = res.getContentText();
+  var detail = '（確認結果: ' + r.trace + '）';
+  if (r.login) {
+    return '「アクセスできるユーザー」が「全員」になっていません（「Google アカウントを持つ全員」「自分のみ」は不可）。' +
+      '「デプロイ → デプロイを管理 → ✏️編集」で、アクセスできるユーザーを「全員」にして「デプロイ」してください。' + detail;
+  }
+  var code = r.res.getResponseCode();
+  var text = r.res.getContentText();
   var json = null;
   try {
     json = JSON.parse(text);
   } catch (e) {
     json = null;
   }
-  if (json && json.ok && json.app === 'senkoukanri') return '';
-  if (/accounts\.google\.com|ServiceLogin/i.test(text) || code === 401 || code === 403) {
-    return '「アクセスできるユーザー」が「全員」になっていません（「Google アカウントを持つ全員」は不可）。' +
-      '「デプロイ → デプロイを管理 → ✏️編集」で、アクセスできるユーザーを「全員」にして「デプロイ」してください。';
+  if (json && json.ok) return '';
+  if (json && json.error === 'unauthorized') {
+    return 'この URL は、このスプレッドシートとは別の Apps Script のウェブアプリです。' +
+      'このスプレッドシートの「拡張機能 → Apps Script」を開き、そこの「デプロイ → デプロイを管理」の URL を使ってください。' + detail;
   }
-  if (code === 404 || /ファイルを開くことができません|unable to open the file/i.test(text)) {
-    return 'この URL のウェブアプリが見つかりません。「デプロイ → デプロイを管理」に表示される URL をそのままコピーして貼り付けてください。';
+  if (json) return 'ウェブアプリがエラーを返しました: ' + (json.message || json.error) + detail;
+  var snippet = text.replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (/accounts\.google\.com|ServiceLogin/i.test(text)) {
+    return '「アクセスできるユーザー」が「全員」になっていません。「デプロイ → デプロイを管理 → ✏️編集」で「全員」にしてください。' + detail;
   }
-  return 'ウェブアプリが古いコードのまま動いているか、エラーになっています（HTTP ' + code + '）。' +
+  if (code === 404) {
+    return 'この URL のウェブアプリが見つかりません。「デプロイ → デプロイを管理」に表示される URL をそのままコピーして貼り付けてください。' +
+      detail + '（応答: ' + snippet + '）';
+  }
+  return 'ウェブアプリが古いコードのまま動いているか、エラーになっています。' +
     '「デプロイ → デプロイを管理 → ✏️編集 → バージョン：新バージョン → デプロイ」で最新のコードを反映してください。' +
-    '（応答: ' + text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) + '）';
+    detail + '（HTTP ' + code + ' 応答: ' + snippet + '）';
 }
 
 /** ダイアログから呼ばれる。接続用リンクを自分宛てにメールする。 */
@@ -443,6 +485,8 @@ var CONNECT_DIALOG_HTML = [
   '<button id="mk" onclick="make()">接続用 QR コードを作る</button>',
   '<div id="busy" class="note"></div>',
   '<div id="err" class="err"></div>',
+  '<div id="skip" style="display:none"><div class="note">URL が正しいのに確認だけ失敗する場合は、確認せずに作ってスマホで試せます。</div>',
+  '<button class="sub" onclick="make(true)">確認せずに QR コードを作る</button></div>',
   '<div id="out" style="display:none">',
   '<h3>2. スマホのカメラで読み取る</h3>',
   '<div id="qr"></div>',
@@ -457,9 +501,10 @@ var CONNECT_DIALOG_HTML = [
   'document.getElementById("url").value = info.webAppUrl || "";',
   'function b64url(s){return btoa(unescape(encodeURIComponent(s))).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"");}',
   'var link = "", code = "";',
-  'function make(){',
+  'function make(skip){',
   '  var url = document.getElementById("url").value.trim();',
   '  document.getElementById("err").textContent = "";',
+  '  document.getElementById("skip").style.display = "none";',
   '  document.getElementById("out").style.display = "none";',
   '  document.getElementById("busy").textContent = "ウェブアプリにつながるか確認しています…";',
   '  document.getElementById("mk").disabled = true;',
@@ -467,11 +512,12 @@ var CONNECT_DIALOG_HTML = [
   '      document.getElementById("busy").textContent = "";',
   '      document.getElementById("mk").disabled = false;',
   '      document.getElementById("err").textContent = e.message;',
+  '      if (!/形式|テスト用/.test(e.message)) document.getElementById("skip").style.display = "block";',
   '    })',
   '    .withSuccessHandler(function(saved){',
   '      url = saved;',
   '      document.getElementById("url").value = saved;',
-  '      document.getElementById("busy").textContent = "✅ ウェブアプリにつながりました";',
+  '      document.getElementById("busy").textContent = skip ? "確認せずに作りました" : "✅ ウェブアプリにつながりました";',
   '      document.getElementById("mk").disabled = false;',
   '      code = b64url(JSON.stringify({u:url,t:info.token}));',
   '      link = info.appUrl.replace(/#.*$/,"") + "#connect=" + code;',
@@ -479,7 +525,7 @@ var CONNECT_DIALOG_HTML = [
   '      var qr = document.getElementById("qr"); qr.innerHTML = "";',
   '      new QRCode(qr, {text: link, width: 260, height: 260, correctLevel: QRCode.CorrectLevel.L});',
   '      document.getElementById("out").style.display = "block";',
-  '    }).saveWebAppUrl(url);',
+  '    }).saveWebAppUrl(url, !!skip);',
   '}',
   'function mail(){',
   '  google.script.run.withSuccessHandler(function(me){document.getElementById("mailed").textContent = " " + me + " に送信しました";})',

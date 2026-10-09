@@ -169,7 +169,7 @@ function makeEnv({ now } = {}) {
       fetch: (url, opt) => {
         fetches.push({ url, opt });
         const r = fetchResponder(url, opt);
-        return { getResponseCode: () => r.code, getContentText: () => r.body || '' };
+        return { getResponseCode: () => r.code, getContentText: () => r.body || '', getHeaders: () => r.headers || {} };
       },
     },
     GmailApp: {

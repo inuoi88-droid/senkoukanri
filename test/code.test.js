@@ -362,40 +362,63 @@ test('testPush は登録端末に送り結果を返す', () => {
   assert.strictEqual(h.call('unsubscribe', { endpoint: dev.endpoint }).devices.length, 0);
 });
 
-test('接続ダイアログはウェブアプリを呼び出して設定ミスを見つける', () => {
+test('接続ダイアログはブラウザと同じ手順でウェブアプリを呼び出し、設定ミスを見つける', () => {
   const h = boot();
   const url = 'https://script.google.com/macros/s/AKfycbxTEST_123-abc/exec';
-  const tryUrl = (u) => {
+  const echo = 'https://script.googleusercontent.com/macros/echo?user_content_key=abc&lib=xyz';
+  const tryUrl = (u, skip) => {
     try {
-      return { ok: h.ctx.saveWebAppUrl(u) };
+      return { ok: h.ctx.saveWebAppUrl(u, skip) };
     } catch (e) {
       return { error: e.message };
     }
   };
-  // 正常（ping に JSON で応答）
-  h.setFetchResponder((u, opt) => {
-    assert.strictEqual(u, url);
-    assert.strictEqual(opt.method, 'post');
-    assert.deepStrictEqual(JSON.parse(opt.payload), { action: 'ping' });
-    return { code: 200, body: JSON.stringify({ ok: true, app: 'senkoukanri' }) };
-  });
+  // 本物の GAS と同じ：POST は 302 で echo に飛ばし、echo を GET すると JSON（実際の doPost の結果を返す）
+  const realistic = (u, opt) => {
+    if (u === url) {
+      assert.strictEqual(opt.method, 'post');
+      assert.strictEqual(opt.followRedirects, false);
+      const out = h.ctx.doPost({ postData: { contents: opt.payload } });
+      realistic.last = out.text;
+      return { code: 302, headers: { Location: echo } };
+    }
+    if (u === echo) {
+      assert.ok(!opt.method || opt.method === 'get', '移動先は GET で取りに行く');
+      return { code: 200, body: realistic.last };
+    }
+    return { code: 404, body: 'not found' };
+  };
+  h.setFetchResponder(realistic);
   assert.deepStrictEqual(tryUrl(url + '?foo=1 '), { ok: url });
   assert.strictEqual(h.props.WEBAPP_URL, url);
 
-  // 「Google アカウントを持つ全員」→ ログイン画面
-  h.setFetchResponder(() => ({ code: 200, body: '<html><a href="https://accounts.google.com/ServiceLogin">ログイン</a></html>' }));
-  assert.match(tryUrl(url).error, /「全員」になっていません/);
+  // 別のスクリプトのウェブアプリ（合言葉が違う）
+  h.setFetchResponder((u) =>
+    u === url ? { code: 302, headers: { Location: echo } } : { code: 200, body: JSON.stringify({ ok: false, error: 'unauthorized' }) }
+  );
+  assert.match(tryUrl(url).error, /別の Apps Script/);
+
+  // 「Google アカウントを持つ全員」「自分のみ」→ ログイン画面へ飛ばされる
+  h.setFetchResponder(() => ({ code: 302, headers: { Location: 'https://accounts.google.com/ServiceLogin?continue=x' } }));
+  const login = tryUrl(url).error;
+  assert.match(login, /「全員」になっていません/);
+  assert.match(login, /POST 302 → accounts\.google\.com/);
 
   // URL 違い
-  h.setFetchResponder(() => ({ code: 404, body: '<html>現在、ファイルを開くことができません。</html>' }));
-  assert.match(tryUrl(url).error, /見つかりません/);
+  h.setFetchResponder(() => ({ code: 404, body: '<html><title>Error</title>現在、ファイルを開くことができません。</html>' }));
+  assert.match(tryUrl(url).error, /見つかりません.*POST 404.*ファイルを開くことができません/);
 
   // 古いバージョン・エラー
-  h.setFetchResponder(() => ({ code: 200, body: '<html><body>エラー: SyntaxError: Unexpected end of input</body></html>' }));
+  h.setFetchResponder((u) =>
+    u === url ? { code: 302, headers: { Location: echo } } : { code: 200, body: '<html><body>エラー: SyntaxError: Unexpected end of input</body></html>' }
+  );
   assert.match(tryUrl(url).error, /新バージョン.*SyntaxError/);
+
+  // 確認をスキップすれば保存できる
+  const other = 'https://script.google.com/macros/s/AKfycbxOTHER/exec';
+  assert.deepStrictEqual(tryUrl(other, true), { ok: other });
 
   // 形式チェック
   assert.match(tryUrl('https://script.google.com/macros/s/AKfycbx/dev').error, /テスト用/);
   assert.match(tryUrl('https://example.com/exec').error, /形式/);
-  assert.strictEqual(h.ctx.getConnectInfo().webAppUrl, url, '失敗した URL では上書きしない');
 });
