@@ -2,7 +2,7 @@
 
 就活の選考状況を **Google スプレッドシート** で管理し、面接・締切・企業からのメールを **スマホにプッシュ通知** するアプリです。
 
-- アプリ：**APP_URL**
+- アプリ：**https://senkoukanri.vercel.app/**
 - データは自分の Google スプレッドシートにだけ保存されます。手で直接編集しても大丈夫です
 - サーバー代はかかりません（Google Apps Script とスマホの Web アプリ機能を使います）
 
@@ -158,7 +158,7 @@ Android は通知の「確認済みにする」ボタンからも押せます。
 | Gmail検知：除外条件 | -category:promotions … | Gmail の検索演算子。メルマガを除外 |
 | 未確認メールの再通知間隔（時間） | 2 | 0 で再通知しない |
 | 再通知しない時間帯 | 0-7 | 未確認メールの再通知を止める時間帯 |
-| アプリのURL | APP_URL | 接続用 QR コードに使う |
+| アプリのURL | https://senkoukanri.vercel.app/ | 接続用 QR コードに使う |
 
 ---
 
@@ -203,4 +203,5 @@ npm run serve       # http://localhost:8080 でアプリを表示
 ```
 
 - Web Push の暗号化は RFC 8291（aes128gcm）、送信者認証は RFC 8292（VAPID / ES256）。Apps Script には WebCrypto が無いため、P-256・AES-GCM・SHA-256 を `gas/WebPush.gs` に実装しています。出力は Node の `http_ece`（`web-push` ライブラリが使っているもの）とバイト単位で一致することをテストで確認しています
-- アプリ本体（`app/`）は静的ファイルだけなので、Vercel / GitHub Pages など HTTPS で配信できる場所ならどこでも動きます
+- アプリ本体（`app/`）は静的ファイルだけなので、HTTPS で配信できる場所ならどこでも動きます。現在は Vercel プロジェクト `senkoukanri`（ルートディレクトリ `app`、ビルドなし）で https://senkoukanri.vercel.app/ に公開しています。GitHub と連携済みなので、`main` ブランチに入った変更は自動で本番に反映されます
+- アプリのファイルを変えたら `app/sw.js` の `VERSION` も上げてください（スマホに古いキャッシュが残らないように）

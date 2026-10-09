@@ -120,7 +120,7 @@ var SETTING_DEFS = [
   { key: 'gmailExclude', label: 'Gmail検知：除外条件', def: '-category:promotions -category:social -category:forums', note: 'Gmail の検索演算子。メルマガを除外しています' },
   { key: 'mailRemindHours', label: '未確認メールの再通知間隔（時間）', def: '2', note: '「確認済」にするまで繰り返し通知します。0 で再通知しない' },
   { key: 'quietHours', label: '再通知しない時間帯', def: '0-7', note: '例: 0-7 → 0:00〜6:59 は未確認メールの再通知を送りません' },
-  { key: 'appUrl', label: 'アプリのURL', def: 'https://inuoi88-droid.github.io/senkoukanri/', note: 'スマホ接続用リンクに使います' }
+  { key: 'appUrl', label: 'アプリのURL', def: 'https://senkoukanri.vercel.app/', note: 'スマホ接続用リンクに使います' }
 ];
 
 // ---------------------------------------------------------------------------
