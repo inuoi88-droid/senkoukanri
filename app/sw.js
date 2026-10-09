@@ -1,5 +1,5 @@
 // Service Worker：オフライン用キャッシュとプッシュ通知の表示
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const CACHE = 'senkou-' + VERSION;
 const ASSETS = [
   './',

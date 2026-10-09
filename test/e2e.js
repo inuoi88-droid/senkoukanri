@@ -83,6 +83,15 @@ function bootGas() {
   await page.waitForSelector('.banner.danger');
   step('不正な接続コードはエラーになる');
 
+  // つながらない URL → 原因確認用のリンクが出る
+  const BROKEN = 'https://script.google.com/macros/s/BROKEN/exec';
+  await page.route(BROKEN, (route) => route.abort());
+  await page.fill('textarea[name=code]', Buffer.from(JSON.stringify({ u: BROKEN, t: token })).toString('base64url'));
+  await page.click('form[data-form="connect"] button[type=submit]');
+  await page.waitForSelector(`a[href="${BROKEN}?action=ping"]`);
+  await shot('01b-setup-network-error');
+  step('サーバーにつながらないときは確認用リンクを出す');
+
   // 2) 接続リンクで開く
   await page.goto(base + '#connect=' + code);
   await page.waitForSelector('.bottomnav');
@@ -225,7 +234,7 @@ function bootGas() {
   await shot('08-home-dark');
   step('ダークモード');
 
-  assert.deepStrictEqual(errors.filter((e) => !/Service Worker|serviceWorker/.test(e)), [], 'コンソールエラーなし');
+  assert.deepStrictEqual(errors.filter((e) => !/Service Worker|serviceWorker|net::ERR_FAILED/.test(e)), [], 'コンソールエラーなし');
   console.log(`\nE2E OK（API 呼び出し ${apiCalls} 回）スクリーンショット: ${SHOTS}`);
   await browser.close();
   server.close();

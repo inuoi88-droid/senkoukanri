@@ -361,3 +361,41 @@ test('testPush は登録端末に送り結果を返す', () => {
   assert.strictEqual(jwt.sub, 'mailto:kotonimukae@gmail.com');
   assert.strictEqual(h.call('unsubscribe', { endpoint: dev.endpoint }).devices.length, 0);
 });
+
+test('接続ダイアログはウェブアプリを呼び出して設定ミスを見つける', () => {
+  const h = boot();
+  const url = 'https://script.google.com/macros/s/AKfycbxTEST_123-abc/exec';
+  const tryUrl = (u) => {
+    try {
+      return { ok: h.ctx.saveWebAppUrl(u) };
+    } catch (e) {
+      return { error: e.message };
+    }
+  };
+  // 正常（ping に JSON で応答）
+  h.setFetchResponder((u, opt) => {
+    assert.strictEqual(u, url);
+    assert.strictEqual(opt.method, 'post');
+    assert.deepStrictEqual(JSON.parse(opt.payload), { action: 'ping' });
+    return { code: 200, body: JSON.stringify({ ok: true, app: 'senkoukanri' }) };
+  });
+  assert.deepStrictEqual(tryUrl(url + '?foo=1 '), { ok: url });
+  assert.strictEqual(h.props.WEBAPP_URL, url);
+
+  // 「Google アカウントを持つ全員」→ ログイン画面
+  h.setFetchResponder(() => ({ code: 200, body: '<html><a href="https://accounts.google.com/ServiceLogin">ログイン</a></html>' }));
+  assert.match(tryUrl(url).error, /「全員」になっていません/);
+
+  // URL 違い
+  h.setFetchResponder(() => ({ code: 404, body: '<html>現在、ファイルを開くことができません。</html>' }));
+  assert.match(tryUrl(url).error, /見つかりません/);
+
+  // 古いバージョン・エラー
+  h.setFetchResponder(() => ({ code: 200, body: '<html><body>エラー: SyntaxError: Unexpected end of input</body></html>' }));
+  assert.match(tryUrl(url).error, /新バージョン.*SyntaxError/);
+
+  // 形式チェック
+  assert.match(tryUrl('https://script.google.com/macros/s/AKfycbx/dev').error, /テスト用/);
+  assert.match(tryUrl('https://example.com/exec').error, /形式/);
+  assert.strictEqual(h.ctx.getConnectInfo().webAppUrl, url, '失敗した URL では上書きしない');
+});

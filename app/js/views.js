@@ -502,7 +502,14 @@ export function setupView(ui) {
       <img class="logo" src="icons/icon-192.png" alt="">
       <h1>選考管理</h1>
       <p class="lead">面接・締切・企業からのメールを<br>見逃さないための就活アプリ</p>
-      ${ui.setupError ? html`<div class="banner danger"><div class="main">${ui.setupError}</div></div>` : ''}
+      ${ui.setupError ? html`<div class="banner danger"><div class="main">${ui.setupError}
+        ${ui.setupCheckUrl
+          ? html`<div style="margin-top:8px">原因を確かめるには、次のリンクを開いてください。<br>
+              <a href="${ui.setupCheckUrl}" target="_blank" rel="noopener">ウェブアプリを直接開いて確認</a><br>
+              <span class="tiny">・<code>{"ok":true,"app":"senkoukanri"}</code> と出る → 正常です。もう一度「接続する」を押してください<br>
+              ・Google のログイン画面が出る → 「アクセスできるユーザー」が「全員」になっていません<br>
+              ・「ファイルを開くことができません」→ URL が違うか、デプロイが古いままです</span></div>`
+          : ''}</div></div>` : ''}
       <div class="card pad">
         <form data-form="connect">
           <label class="field"><span>接続コード</span>

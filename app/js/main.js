@@ -6,7 +6,7 @@ import { pushSupport, permission, getSubscription, ensureSubscription, requestAn
 import { copyText, deviceName, fromLocalInput, isIOS, isStandalone, html } from './util.js';
 import * as V from './views.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 
 const ui = {
   version: VERSION,
@@ -19,6 +19,7 @@ const ui = {
   eventFilter: 'upcoming',
   setupError: '',
   setupCode: '',
+  setupCheckUrl: '',
   connecting: false,
 };
 
@@ -260,6 +261,7 @@ async function disablePush() {
 async function connect(newCfg) {
   ui.connecting = true;
   ui.setupError = '';
+  ui.setupCheckUrl = '';
   render();
   try {
     const d = await callApi(newCfg, 'data');
@@ -285,6 +287,8 @@ async function connect(newCfg) {
   } catch (e) {
     ui.connecting = false;
     ui.setupError = e.message;
+    // 通信そのものに失敗したときは、ブラウザで直接開いて原因を確かめられるようにする
+    if (e.code === 'network' || e.code === 'bad_response') ui.setupCheckUrl = newCfg.url + '?action=ping';
     render();
   }
 }
@@ -438,6 +442,7 @@ const forms = {
       await connect(parseConnectCode(v.code));
     } catch (e) {
       ui.setupError = e.message;
+      ui.setupCheckUrl = '';
       render();
     }
   },

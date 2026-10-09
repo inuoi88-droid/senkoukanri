@@ -358,30 +358,64 @@ function showConnectDialog() {
 /** ダイアログから呼ばれる。接続に必要な情報を返す。 */
 function getConnectInfo() {
   var props = PropertiesService.getScriptProperties();
-  var url = props.getProperty('WEBAPP_URL') || '';
-  if (!url) {
-    try {
-      var u = ScriptApp.getService().getUrl();
-      if (u && /\/exec$/.test(u)) url = u;
-    } catch (e) {
-      // 未デプロイ
-    }
-  }
   return {
-    webAppUrl: url,
+    webAppUrl: props.getProperty('WEBAPP_URL') || '',
     token: props.getProperty('API_TOKEN'),
     appUrl: readSettings_().appUrl
   };
 }
 
-/** ダイアログから呼ばれる。Web アプリ URL を保存する。 */
+/** ダイアログから呼ばれる。ウェブアプリを実際に呼び出して確かめてから URL を保存する。 */
 function saveWebAppUrl(url) {
-  url = String(url || '').trim();
-  if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(url)) {
-    throw new Error('「https://script.google.com/…/exec」の形式の URL を貼り付けてください');
+  url = String(url || '').trim().replace(/[?#].*$/, '');
+  if (/\/dev$/.test(url)) {
+    throw new Error('末尾が「/dev」の URL はテスト用です。「デプロイ → デプロイを管理」に表示される、末尾が「/exec」の URL を貼り付けてください。');
   }
+  if (!/^https:\/\/script\.google\.com\/(a\/[^\/]+\/)?macros\/s\/[\w-]+\/exec$/.test(url)) {
+    throw new Error('「https://script.google.com/macros/s/…/exec」の形式の URL を貼り付けてください。');
+  }
+  var problem = diagnoseWebApp_(url);
+  if (problem) throw new Error(problem);
   PropertiesService.getScriptProperties().setProperty('WEBAPP_URL', url);
-  return true;
+  return url;
+}
+
+/**
+ * スマホと同じように（ログインなしで）ウェブアプリを呼び出し、問題があれば原因を返す。
+ * 問題が無ければ空文字。
+ */
+function diagnoseWebApp_(url) {
+  var res;
+  try {
+    res = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'text/plain;charset=utf-8',
+      payload: JSON.stringify({ action: 'ping' }),
+      followRedirects: true,
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    return 'ウェブアプリを呼び出せませんでした: ' + e.message;
+  }
+  var code = res.getResponseCode();
+  var text = res.getContentText();
+  var json = null;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    json = null;
+  }
+  if (json && json.ok && json.app === 'senkoukanri') return '';
+  if (/accounts\.google\.com|ServiceLogin/i.test(text) || code === 401 || code === 403) {
+    return '「アクセスできるユーザー」が「全員」になっていません（「Google アカウントを持つ全員」は不可）。' +
+      '「デプロイ → デプロイを管理 → ✏️編集」で、アクセスできるユーザーを「全員」にして「デプロイ」してください。';
+  }
+  if (code === 404 || /ファイルを開くことができません|unable to open the file/i.test(text)) {
+    return 'この URL のウェブアプリが見つかりません。「デプロイ → デプロイを管理」に表示される URL をそのままコピーして貼り付けてください。';
+  }
+  return 'ウェブアプリが古いコードのまま動いているか、エラーになっています（HTTP ' + code + '）。' +
+    '「デプロイ → デプロイを管理 → ✏️編集 → バージョン：新バージョン → デプロイ」で最新のコードを反映してください。' +
+    '（応答: ' + text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) + '）';
 }
 
 /** ダイアログから呼ばれる。接続用リンクを自分宛てにメールする。 */
@@ -406,7 +440,8 @@ var CONNECT_DIALOG_HTML = [
   '<h3>1. ウェブアプリの URL</h3>',
   '<div class="note">「デプロイ &gt; デプロイを管理」に表示される「ウェブアプリ」の URL（…/exec）を貼り付けてください。</div>',
   '<input id="url" placeholder="https://script.google.com/macros/s/xxxxx/exec">',
-  '<button onclick="make()">接続用 QR コードを作る</button>',
+  '<button id="mk" onclick="make()">接続用 QR コードを作る</button>',
+  '<div id="busy" class="note"></div>',
   '<div id="err" class="err"></div>',
   '<div id="out" style="display:none">',
   '<h3>2. スマホのカメラで読み取る</h3>',
@@ -425,8 +460,19 @@ var CONNECT_DIALOG_HTML = [
   'function make(){',
   '  var url = document.getElementById("url").value.trim();',
   '  document.getElementById("err").textContent = "";',
-  '  google.script.run.withFailureHandler(function(e){document.getElementById("err").textContent = e.message;})',
-  '    .withSuccessHandler(function(){',
+  '  document.getElementById("out").style.display = "none";',
+  '  document.getElementById("busy").textContent = "ウェブアプリにつながるか確認しています…";',
+  '  document.getElementById("mk").disabled = true;',
+  '  google.script.run.withFailureHandler(function(e){',
+  '      document.getElementById("busy").textContent = "";',
+  '      document.getElementById("mk").disabled = false;',
+  '      document.getElementById("err").textContent = e.message;',
+  '    })',
+  '    .withSuccessHandler(function(saved){',
+  '      url = saved;',
+  '      document.getElementById("url").value = saved;',
+  '      document.getElementById("busy").textContent = "✅ ウェブアプリにつながりました";',
+  '      document.getElementById("mk").disabled = false;',
   '      code = b64url(JSON.stringify({u:url,t:info.token}));',
   '      link = info.appUrl.replace(/#.*$/,"") + "#connect=" + code;',
   '      document.getElementById("code").value = code;',
