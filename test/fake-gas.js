@@ -127,6 +127,64 @@ class FakeSpreadsheet {
   getUrl() { return 'https://docs.google.com/spreadsheets/d/fake/edit'; }
 }
 
+// ---------- Google カレンダーの偽物（日本時間のカレンダーとして振る舞う） ----------
+const JST = 9 * 3600 * 1000;
+const dayOf = (d) => new Date(d.getTime() + JST).toISOString().slice(0, 10);
+const jstMidnight = (day) => new Date(Date.parse(day + 'T00:00:00Z') - JST);
+
+class FakeCalEvent {
+  constructor(cal, data) {
+    this.cal = cal;
+    Object.assign(this, data);
+    this.updated = cal.clock();
+  }
+  touch() { this.updated = this.cal.clock(); }
+  getId() { return this.id; }
+  getTitle() { return this.title; }
+  setTitle(t) { this.title = t; this.touch(); return this; }
+  isAllDayEvent() { return !!this.allDay; }
+  getStartTime() { return this.allDay ? jstMidnight(this.startDay) : new Date(this.start); }
+  getEndTime() { return this.allDay ? jstMidnight(this.endDay) : new Date(this.end); }
+  getAllDayStartDate() { return jstMidnight(this.startDay); }
+  getAllDayEndDate() { return jstMidnight(this.endDay); }
+  getLocation() { return this.location || ''; }
+  setLocation(l) { this.location = l; this.touch(); return this; }
+  getDescription() { return this.description || ''; }
+  setDescription(d) { this.description = d; this.touch(); return this; }
+  setTime(s, e) { Object.assign(this, { allDay: false, start: s.getTime(), end: e.getTime() }); this.touch(); return this; }
+  setAllDayDate(d) { Object.assign(this, { allDay: true, startDay: dayOf(d), endDay: dayOf(new Date(d.getTime() + 86400000)) }); this.touch(); return this; }
+  setAllDayDates(s, e) { Object.assign(this, { allDay: true, startDay: dayOf(s), endDay: dayOf(e) }); this.touch(); return this; }
+  getLastUpdated() { return new Date(this.updated); }
+  isRecurringEvent() { return !!this.recurring; }
+  deleteEvent() { this.cal.events = this.cal.events.filter((e) => e !== this); }
+}
+
+class FakeCalendar {
+  constructor(id, name, clock) {
+    Object.assign(this, { id, name, clock, events: [], seq: 0 });
+  }
+  getId() { return this.id; }
+  getName() { return this.name; }
+  add(data) {
+    const ev = new FakeCalEvent(this, { id: `ev${++this.seq}@google.com`, location: '', description: '', ...data });
+    this.events.push(ev);
+    return ev;
+  }
+  getEvents(s, e) {
+    return this.events.filter((ev) => ev.getStartTime() < e && ev.getEndTime() > s)
+      .sort((a, b) => a.getStartTime() - b.getStartTime());
+  }
+  getEventById(id) { return this.events.find((e) => e.id === id) || null; }
+  createEvent(title, s, e, opts = {}) {
+    return this.add({ title, allDay: false, start: s.getTime(), end: e.getTime(), location: opts.location, description: opts.description });
+  }
+  createAllDayEvent(title, s, a, b) {
+    const end = a instanceof Date || (a && a.getTime) ? a : null;
+    const opts = (end ? b : a) || {};
+    return this.add({ title, allDay: true, startDay: dayOf(s), endDay: dayOf(end || new Date(s.getTime() + 86400000)), location: opts.location, description: opts.description });
+  }
+}
+
 function makeEnv({ now } = {}) {
   const ss = new FakeSpreadsheet();
   const props = {};
@@ -137,6 +195,8 @@ function makeEnv({ now } = {}) {
   let fetchResponder = () => ({ code: 201, body: '' });
 
   const builder = () => chainable({ build() { return { built: true }; } });
+  const clockRef = { now: () => Date.now() };
+  const calendars = [new FakeCalendar('job@group.calendar.google.com', '長谷川＿就活カレンダー', () => clockRef.now())];
 
   const env = {
     SpreadsheetApp: {
@@ -160,7 +220,11 @@ function makeEnv({ now } = {}) {
       newTrigger: (fn) => chainable({ create() { const t = { getHandlerFunction: () => fn }; triggers.push(t); return t; } }),
       getService: () => ({ getUrl: () => 'https://script.google.com/macros/s/FAKE/exec' }),
     },
-    Session: { getEffectiveUser: () => ({ getEmail: () => 'kotonimukae@gmail.com' }) },
+    Session: { getEffectiveUser: () => ({ getEmail: () => 'kotonimukae@gmail.com' }), getScriptTimeZone: () => 'Asia/Tokyo' },
+    CalendarApp: {
+      getCalendarById: (id) => calendars.find((c) => c.id === id) || null,
+      getAllCalendars: () => calendars.slice(),
+    },
     ContentService: {
       MimeType: { JSON: 'json' },
       createTextOutput: (text) => ({ text, setMimeType() { return this; } }),
@@ -179,12 +243,20 @@ function makeEnv({ now } = {}) {
     Utilities: {
       getUuid: () => crypto.randomUUID(),
       newBlob: (bytes, type) => ({ bytes, type }),
+      formatDate: (d, tz, fmt) => {
+        if (tz !== 'Asia/Tokyo' || fmt !== 'yyyy-MM-dd') throw new Error('未対応の formatDate');
+        return dayOf(d);
+      },
+      parseDate: (str, tz, fmt) => {
+        if (tz !== 'Asia/Tokyo' || fmt !== 'yyyy-MM-dd') throw new Error('未対応の parseDate');
+        return jstMidnight(str);
+      },
     },
     Logger: { log: () => {} },
     HtmlService: {},
   };
   return {
-    env, ss, props, triggers, fetches, sentMails, gmail,
+    env, ss, props, triggers, fetches, sentMails, gmail, calendars, clockRef,
     setFetchResponder: (fn) => { fetchResponder = fn; },
   };
 }

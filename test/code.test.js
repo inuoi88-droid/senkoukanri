@@ -25,7 +25,10 @@ function boot(nowMs) {
     globalThis.Date = FakeDate;
     globalThis.__setNow = function (ms) { fixed = ms; };
   })()`, ctx);
-  const setNow = (ms) => ctx.__setNow(ms);
+  const setNow = (ms) => {
+    ctx.__setNow(ms);
+    h.clockRef.now = () => ms;
+  };
   setNow(nowMs || JST('2026-10-10T12:00'));
   ctx.setup();
   const token = h.props.API_TOKEN;
@@ -77,7 +80,7 @@ function pushes(h, dev, { withDigest = false } = {}) {
 test('setup でシート・設定・鍵・トリガーが作られる', () => {
   const h = boot();
   const names = h.ss.getSheets().map((s) => s.name);
-  assert.deepStrictEqual(names.sort(), ['予定', '企業', '設定', 'メール', '通知ログ', '通知端末'].sort());
+  assert.deepStrictEqual(names.sort(), ['予定', '企業', '設定', 'メール', '通知ログ', '通知端末', 'カレンダー同期'].sort());
   assert.deepStrictEqual(h.ss.getSheetByName('企業').data[0].slice(0, 3), ['ID', '企業名', 'ステータス']);
   assert.strictEqual(h.ss.tz, 'Asia/Tokyo');
   assert.match(h.props.API_TOKEN, /^[0-9a-f]{64}$/);
@@ -421,4 +424,166 @@ test('接続ダイアログはブラウザと同じ手順でウェブアプリ�
   // 形式チェック
   assert.match(tryUrl('https://script.google.com/macros/s/AKfycbx/dev').error, /テスト用/);
   assert.match(tryUrl('https://example.com/exec').error, /形式/);
+});
+
+// ---------------------------------------------------------------------------
+// Google カレンダー連携
+// ---------------------------------------------------------------------------
+
+const CAL_ID = 'job@group.calendar.google.com';
+const iso = (s) => new Date(JST(s)).toISOString();
+
+function calSetup() {
+  const h = boot(JST('2026-10-10T12:00'));
+  const cal = h.calendars[0];
+  h.call('saveCompany', { company: { name: 'IBM', status: '三次面接' } });
+  h.call('saveCompany', { company: { name: 'ソニー' } });
+  h.call('saveCompany', { company: { name: '落ちた社', status: 'お祈り' } });
+  const r1 = h.call('saveEvent', { event: { company: 'IBM', type: '面接', title: '三次面接', datetime: iso('2026-10-15T14:00'), place: 'Zoom' } }).savedId;
+  const r2 = h.call('saveEvent', { event: { company: 'ソニー', type: 'ES締切', title: '本選考ES', datetime: iso('2026-10-20T23:59') } }).savedId;
+  h.call('saveEvent', { event: { company: '落ちた社', type: '面接', datetime: iso('2026-10-16T10:00') } });
+  h.call('saveEvent', { event: { company: 'IBM', type: '面接', title: '一次面接', datetime: iso('2026-10-01T10:00') } });
+  const c1 = cal.add({ title: 'IBM 三次面接', allDay: false, start: JST('2026-10-15T14:00'), end: JST('2026-10-15T15:00') });
+  const c2 = cal.add({ title: 'シンプレクス人事面談', allDay: false, start: JST('2026-10-16T09:00'), end: JST('2026-10-16T10:00') });
+  const c3 = cal.add({ title: 'アビーム　キャリア志向シート', allDay: true, startDay: '2026-10-23', endDay: '2026-10-24' });
+  cal.add({ title: 'M&Aセンターサマーインターン①', allDay: false, start: JST('2026-10-01T09:30'), end: JST('2026-10-01T18:30') });
+  cal.add({ title: '週次メンター', allDay: false, start: JST('2026-10-12T21:00'), end: JST('2026-10-12T22:00'), recurring: true });
+  const c6 = cal.add({ title: 'ソニー 説明会', allDay: false, start: JST('2026-10-18T13:00'), end: JST('2026-10-18T14:00'), location: '本社' });
+  return { h, cal, r1, r2, c1, c2, c3, c6 };
+}
+
+const rowsOf = (h) => h.ss.getSheetByName('予定').objects();
+const rowById = (h, id) => rowsOf(h).find((r) => r['ID'] === id);
+
+test('カレンダー連携: プレビューでは何も変えず、開始すると取り込み・追加・紐づけをする', () => {
+  const { h, cal, r1, r2, c1 } = calSetup();
+  const before = { events: cal.events.length, rows: rowsOf(h).length };
+
+  const pv = h.ctx.previewCalendarSync(CAL_ID, true);
+  assert.strictEqual(pv.link, 1);
+  assert.strictEqual(pv.import, 3);
+  assert.strictEqual(pv.create, 1);
+  assert.deepStrictEqual(Array.from(pv.samples.create), ['10/20 23:59　ソニー 本選考ES']);
+  assert.deepStrictEqual({ events: cal.events.length, rows: rowsOf(h).length }, before, 'プレビューでは変更しない');
+
+  const r = h.ctx.startCalendarSync(CAL_ID, true);
+  assert.strictEqual(r.import, 3);
+  // アプリ → カレンダー（締切は終日予定）
+  const created = cal.events.find((e) => e.title === '〆23:59 ソニー 本選考ES');
+  assert.ok(created, 'ソニーの締切がカレンダーに入る');
+  assert.strictEqual(created.allDay, true);
+  assert.strictEqual(created.startDay, '2026-10-20');
+  assert.match(created.description, /選考管理アプリと同期/);
+  assert.ok(!cal.events.some((e) => /落ちた社/.test(e.title)), 'お祈りの企業は追加しない');
+  assert.ok(!cal.events.some((e) => /一次面接/.test(e.title)), '過去の予定は追加しない');
+  assert.strictEqual(cal.events.filter((e) => /三次面接/.test(e.title)).length, 1, '両方にある予定は二重に作らない');
+
+  // カレンダー → アプリ
+  const rows = rowsOf(h);
+  const imp = (t) => rows.find((x) => x['内容'] === t);
+  assert.strictEqual(imp('シンプレクス人事面談')['種別'], 'その他');
+  assert.strictEqual(imp('シンプレクス人事面談')['企業名'], '');
+  assert.strictEqual(imp('アビーム　キャリア志向シート')['種別'], 'ES締切');
+  assert.strictEqual(imp('アビーム　キャリア志向シート')['日時'].toISOString(), iso('2026-10-23T23:59'));
+  assert.strictEqual(imp('ソニー 説明会')['企業名'], 'ソニー');
+  assert.strictEqual(imp('ソニー 説明会')['種別'], '説明会');
+  assert.strictEqual(imp('ソニー 説明会')['場所・URL'], '本社');
+  assert.ok(!imp('M&Aセンターサマーインターン①'), '過去の予定は取り込まない');
+  assert.ok(!imp('週次メンター'), '繰り返し予定は取り込まない');
+
+  // 設定とアプリへの表示
+  const data = h.call('data');
+  assert.strictEqual(data.options.calendar.on, true);
+  assert.strictEqual(data.options.calendar.name, '長谷川＿就活カレンダー');
+  assert.strictEqual(data.events.find((e) => e.id === r1).calendar, true);
+  assert.strictEqual(data.events.find((e) => e.id === r2).calendar, true);
+  assert.strictEqual(h.ss.getSheetByName('設定').objects().find((x) => x['項目'] === 'カレンダー連携：カレンダーID')['値'], CAL_ID);
+
+  // 2 回目は何も起きない（安定している）
+  const again = h.ctx.syncCalendar_();
+  assert.deepStrictEqual([again.create, again.import, again.link, again.push, again.pull], [0, 0, 0, 0, 0]);
+  assert.ok(c1);
+});
+
+test('カレンダー連携: どちらで変えても反映され、削除の扱いも作成元で変わる', () => {
+  const { h, cal, r1, r2, c1, c2, c3, c6 } = calSetup();
+  h.ctx.startCalendarSync(CAL_ID, true);
+
+  // カレンダーで時間を変える → アプリへ
+  h.setNow(JST('2026-10-10T12:05'));
+  c1.setTime(new Date(JST('2026-10-15T16:00')), new Date(JST('2026-10-15T17:00')));
+  c2.setLocation('大手町');
+  h.ctx.runScheduler();
+  assert.strictEqual(rowById(h, r1)['日時'].toISOString(), iso('2026-10-15T16:00'));
+  assert.strictEqual(rowsOf(h).find((x) => x['内容'] === 'シンプレクス人事面談')['場所・URL'], '大手町');
+
+  // アプリで締切を変える → カレンダーへ（タイトルの時刻も変わる）
+  h.setNow(JST('2026-10-10T12:10'));
+  h.call('saveEvent', { event: { id: r2, datetime: iso('2026-10-21T17:00') } });
+  const sonyEs = cal.events.find((e) => /本選考ES/.test(e.title));
+  assert.strictEqual(sonyEs.startDay, '2026-10-21');
+  assert.strictEqual(sonyEs.title, '〆17:00 ソニー 本選考ES');
+
+  // 両方で変えたら新しい方が勝つ
+  h.setNow(JST('2026-10-10T12:20'));
+  h.call('saveEvent', { event: { id: r1, place: 'アプリで変更' } });
+  h.setNow(JST('2026-10-10T12:30'));
+  c1.setLocation('カレンダーで変更（あとから）');
+  h.ctx.runScheduler();
+  assert.strictEqual(rowById(h, r1)['場所・URL'], 'カレンダーで変更（あとから）');
+
+  // アプリで作った予定をアプリで消す → カレンダーからも消える
+  h.call('deleteEvent', { id: r2 });
+  assert.ok(!cal.events.some((e) => /本選考ES/.test(e.title)));
+
+  // カレンダーから取り込んだ予定をアプリで消す → カレンダーには残り、取り込み直さない
+  const sonySetsumei = rowsOf(h).find((x) => x['内容'] === 'ソニー 説明会')['ID'];
+  h.call('deleteEvent', { id: sonySetsumei });
+  assert.ok(cal.events.includes(c6), 'カレンダーの予定は消さない');
+  h.ctx.runScheduler();
+  assert.ok(!rowsOf(h).some((x) => x['内容'] === 'ソニー 説明会'), '取り込み直さない');
+
+  // カレンダーで消す → アプリからも消える
+  c3.deleteEvent();
+  h.ctx.runScheduler();
+  assert.ok(!rowsOf(h).some((x) => x['内容'] === 'アビーム　キャリア志向シート'));
+
+  // カレンダーに新しく入れた予定は次の同期で取り込まれる
+  cal.add({ title: 'IBM 最終面接', allDay: false, start: JST('2026-10-25T10:00'), end: JST('2026-10-25T11:00') });
+  h.ctx.runScheduler();
+  const fin = rowsOf(h).find((x) => x['内容'] === 'IBM 最終面接');
+  assert.strictEqual(fin['企業名'], 'IBM');
+  assert.strictEqual(fin['種別'], '面接');
+  assert.match(h.call('data').options.calendar.error, /^$/);
+});
+
+test('カレンダー連携: 取り込み OFF ならアプリ → カレンダーだけ。連携をやめても予定は消えない', () => {
+  const { h, cal } = calSetup();
+  const pv = h.ctx.previewCalendarSync(CAL_ID, false);
+  assert.strictEqual(pv.import, 0);
+  h.ctx.startCalendarSync(CAL_ID, false);
+  assert.ok(!rowsOf(h).some((x) => x['内容'] === 'シンプレクス人事面談'));
+  assert.ok(cal.events.some((e) => /本選考ES/.test(e.title)));
+  const n = cal.events.length;
+  h.ctx.stopCalendarSync();
+  h.ctx.runScheduler();
+  assert.strictEqual(cal.events.length, n);
+  assert.strictEqual(h.call('data').options.calendar.on, false);
+});
+
+test('カレンダー連携: 種別の推測・タイトル・セルの安全な書き込み', () => {
+  const h = boot();
+  const g = (t, allDay = false) => h.ctx.guessEventType_(t, allDay);
+  assert.strictEqual(g('【VERTEX 1期生選考】10/3（土）18:00 GD選考会のご案内'), 'GD');
+  assert.strictEqual(g('IBM 三次面接'), '面接');
+  assert.strictEqual(g('玉手箱 受検締切', true), 'Webテスト締切');
+  assert.strictEqual(g('ES提出 締切'), 'ES締切');
+  assert.strictEqual(g('アビーム　キャリア志向シート', true), 'ES締切');
+  assert.strictEqual(g('野村AM　1Dayオープンカンパニー'), '説明会');
+  assert.strictEqual(g('Best 面談'), 'その他', '英単語の中の es は ES 扱いしない');
+  assert.strictEqual(h.ctx.textCell_('=IMPORTXML("x")'), "'=IMPORTXML(\"x\")");
+  assert.strictEqual(h.ctx.textCell_('10/3'), "'10/3");
+  assert.strictEqual(h.ctx.textCell_('IBM 三次面接'), 'IBM 三次面接');
+  assert.strictEqual(h.ctx.calendarTitle_({ company: 'IBM', type: '面接', title: 'IBM 最終面接' }, 'calendar'), 'IBM 最終面接');
+  assert.strictEqual(h.ctx.calendarTitle_({ company: 'ソニー', type: 'ES締切', title: '', datetime: iso('2026-10-20T23:59') }, 'app'), '〆23:59 ソニー ES締切');
 });

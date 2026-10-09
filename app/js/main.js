@@ -6,7 +6,7 @@ import { pushSupport, permission, getSubscription, ensureSubscription, requestAn
 import { copyText, deviceName, fromLocalInput, isIOS, isStandalone, html } from './util.js';
 import * as V from './views.js';
 
-const VERSION = '1.0.1';
+const VERSION = '1.1.0';
 
 const ui = {
   version: VERSION,
@@ -478,7 +478,8 @@ const forms = {
         if (!company) throw new Error('新しい企業名を入力してください');
         if (!S.companyByName(company)) await mutate('saveCompany', { company: { name: company, status: 'エントリー済' } });
       }
-      if (!company) throw new Error('企業を選んでください');
+      if (company === '__none__') company = '';
+      if (!company && !v.title) throw new Error('企業を選ぶか、内容を入力してください');
       const datetime = fromLocalInput(v.datetime);
       if (!datetime) throw new Error('日時を入力してください');
       const event = { company, type: v.type || 'その他', title: v.title, datetime, place: v.place, resultDue: v.resultDue || '', memo: v.memo };
@@ -525,7 +526,8 @@ const actions = {
   'event-delete': async (el) => {
     const ev = S.eventById(el.dataset.id);
     if (!ev) return;
-    const ok = await confirmDialog(`「${ev.company} ${ev.title || ev.type}」を削除しますか？`, '削除する', true);
+    const note = ev.calendar ? '（カレンダーで入れた予定は、カレンダーには残ります）' : '';
+    const ok = await confirmDialog(`「${V.eventName(ev)}」を削除しますか？${note}`, '削除する', true);
     if (!ok) return;
     try {
       const c = S.companyOfEvent(ev);

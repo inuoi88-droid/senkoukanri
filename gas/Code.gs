@@ -83,6 +83,19 @@ var SHEETS = {
       { key: 'lastResult', label: '最終結果', width: 200 }
     ]
   },
+  calsync: {
+    name: 'カレンダー同期',
+    hidden: true,
+    columns: [
+      { key: 'calEventId', label: 'カレンダー予定ID', width: 260 },
+      { key: 'rowId', label: '予定ID', width: 100 },
+      { key: 'origin', label: '作成元', width: 80 },
+      { key: 'rowFp', label: '予定の状態', width: 90 },
+      { key: 'calFp', label: 'カレンダーの状態', width: 90 },
+      { key: 'state', label: '状態', width: 80 },
+      { key: 'syncedAt', label: '同期日時', width: 130 }
+    ]
+  },
   log: {
     name: '通知ログ',
     color: '#64748b',
@@ -120,6 +133,9 @@ var SETTING_DEFS = [
   { key: 'gmailExclude', label: 'Gmail検知：除外条件', def: '-category:promotions -category:social -category:forums', note: 'Gmail の検索演算子。メルマガを除外しています' },
   { key: 'mailRemindHours', label: '未確認メールの再通知間隔（時間）', def: '2', note: '「確認済」にするまで繰り返し通知します。0 で再通知しない' },
   { key: 'quietHours', label: '再通知しない時間帯', def: '0-7', note: '例: 0-7 → 0:00〜6:59 は未確認メールの再通知を送りません' },
+  { key: 'calendarId', label: 'カレンダー連携：カレンダーID', def: '', note: '空欄なら連携しない。メニュー「選考管理 → カレンダーと連携する」で選べます' },
+  { key: 'calendarImport', label: 'カレンダー連携：カレンダーから取り込む', def: 'ON', note: 'ON：カレンダーに直接入れた予定もアプリに取り込む / OFF：アプリ → カレンダーの一方向だけ' },
+  { key: 'calendarDuration', label: 'カレンダー連携：予定の長さ（分）', def: '60', note: 'アプリで登録した面接などをカレンダーに入れるときの長さ' },
   { key: 'appUrl', label: 'アプリのURL', def: 'https://senkoukanri.vercel.app/', note: 'スマホ接続用リンクに使います' }
 ];
 
@@ -132,6 +148,7 @@ function onOpen() {
     .createMenu('選考管理')
     .addItem('① 初期設定（最初に1回）', 'setup')
     .addItem('② スマホと接続する', 'showConnectDialog')
+    .addItem('Google カレンダーと連携する', 'showCalendarDialog')
     .addSeparator()
     .addItem('通知のテスト送信', 'menuTestPush')
     .addItem('今すぐ通知チェックを実行', 'runScheduler')
@@ -204,6 +221,7 @@ function createSheet_(ss, def) {
     if (c.width) sh.setColumnWidth(i + 1, c.width);
   });
   if (def.color) sh.setTabColor(def.color);
+  if (def.hidden) sh.hideSheet();
   return sh;
 }
 
@@ -588,6 +606,7 @@ var API_ = {
 
   saveCompany: function (p) {
     var id = saveCompany_(p.company || {});
+    syncCalendarSafe_();
     var data = getAllData_();
     data.savedId = id;
     return data;
@@ -595,11 +614,13 @@ var API_ = {
 
   deleteCompany: function (p) {
     deleteCompany_(String(p.id || ''));
+    syncCalendarSafe_();
     return getAllData_();
   },
 
   saveEvent: function (p) {
     var id = saveEvent_(p.event || {});
+    syncCalendarSafe_();
     var data = getAllData_();
     data.savedId = id;
     return data;
@@ -610,6 +631,7 @@ var API_ = {
     var row = findById_(t, p.id);
     if (!row) throw new Error('予定が見つかりません（スプレッドシートで削除された可能性があります）');
     t.sheet.deleteRow(row._row);
+    syncCalendarSafe_();
     return getAllData_();
   },
 
@@ -665,6 +687,14 @@ function getAllData_() {
     return !m.confirmed || !d || Date.now() - d.getTime() < 60 * DAY_MS;
   });
   var props = PropertiesService.getScriptProperties();
+  var calendar = { on: !!settings.calendarId, name: props.getProperty('CAL_NAME') || '', error: props.getProperty('CAL_LAST_ERROR') || '' };
+  if (calendar.on) {
+    var linked = {};
+    readCalendarLinks_().links.forEach(function (l) {
+      if (l.state === 'linked') linked[l.rowId] = true;
+    });
+    events.forEach(function (e) { e.calendar = !!linked[e.id]; });
+  }
   return {
     companies: companies,
     events: events,
@@ -675,7 +705,8 @@ function getAllData_() {
       closedStatuses: settings.closedStatuses,
       eventTypes: EVENT_TYPES,
       results: RESULT_OPTIONS,
-      gmail: settings.gmail
+      gmail: settings.gmail,
+      calendar: calendar
     },
     vapidPublicKey: props.getProperty('VAPID_PUBLIC') || '',
     spreadsheetUrl: SpreadsheetApp.getActiveSpreadsheet().getUrl(),
@@ -727,7 +758,8 @@ function readEvents_(companiesByName) {
       done: toBool_(r.done),
       result: str_(r.result),
       resultDue: due ? jstDayKey_(due) : '',
-      memo: str_(r.memo)
+      memo: str_(r.memo),
+      updatedAt: isoOrEmpty_(r.updatedAt)
     };
   });
 }
@@ -811,7 +843,9 @@ function saveEvent_(e) {
   var row = e.id ? findById_(t, e.id) : null;
   if (e.id && !row) throw new Error('予定が見つかりません（スプレッドシートで削除された可能性があります）');
   var fields = pickFields_(e, EVENT_FIELDS);
-  if (!row && !String(fields.company || '').trim()) throw new Error('企業を選んでください');
+  if (!row && !String(fields.company || '').trim() && !String(fields.title || '').trim()) {
+    throw new Error('企業を選ぶか、内容を入力してください');
+  }
   if (fields.datetime !== undefined) {
     if (fields.datetime) {
       var d = new Date(fields.datetime);
@@ -964,9 +998,12 @@ function readSettings_() {
     });
   }
   var byKey = {};
+  var missing = false;
   SETTING_DEFS.forEach(function (d) {
+    if (raw[d.label] === undefined) missing = true;
     byKey[d.key] = raw[d.label] !== undefined ? raw[d.label] : d.def;
   });
+  if (missing) ensureSettingsSheet_(ss); // コードを更新して増えた設定項目をシートに足す
   return parseSettings_(byKey);
 }
 
@@ -1004,6 +1041,9 @@ function parseSettings_(byKey) {
     gmailExclude: String(byKey.gmailExclude == null ? '' : byKey.gmailExclude).trim(),
     mailRemindHours: num(byKey.mailRemindHours, 2),
     quiet: quiet ? [parseInt(quiet[1], 10), parseInt(quiet[2], 10)] : null,
+    calendarId: String(byKey.calendarId == null ? '' : byKey.calendarId).trim(),
+    calendarImport: /^(on|true|1|はい|有効)$/i.test(String(byKey.calendarImport).trim()),
+    calendarDuration: num(byKey.calendarDuration, 60),
     appUrl: String(byKey.appUrl || '').trim()
   };
 }
@@ -1177,7 +1217,9 @@ function isQuiet_(settings, now) {
 }
 
 function eventLabel_(ev) {
-  return (ev.company ? ev.company + ' ' : '') + (ev.title || ev.type);
+  var title = ev.title || ev.type;
+  if (!ev.company || normalizeName_(title).indexOf(normalizeName_(ev.company)) >= 0) return title;
+  return ev.company + ' ' + title;
 }
 
 /** 通知対象として生きている予定か（終了した企業・結果が出た予定・完了した締切は除く） */
@@ -1459,6 +1501,7 @@ function runScheduler() {
   try {
     var now = new Date();
     var settings = readSettings_();
+    if (settings.calendarId) syncCalendarSafe_();
     var companies = readCompanies_();
     var events = readEvents_(indexByName_(companies));
     var mails = readMails_();
@@ -1667,3 +1710,634 @@ function menuTestPush() {
   var lines = r.perDevice.map(function (d) { return (d.name || '端末') + '：' + (d.ok ? '送信OK' : '失敗 ' + d.status + ' ' + d.detail); });
   SpreadsheetApp.getUi().alert(lines.length ? lines.join('\n') : '通知を受け取る端末が登録されていません。スマホのアプリで「通知をオンにする」を押してください。');
 }
+
+// ---------------------------------------------------------------------------
+// Google カレンダー連携（双方向）
+//
+// - アプリ（予定シート）の予定 → カレンダーに作る（作成元: app）
+// - カレンダーに直接入れた予定 → アプリに取り込む（作成元: calendar）
+// - 紐づいた予定は、変わった側の内容をもう一方へ反映する（両方変わったら新しい方）
+// - 同期するのは今日以降の予定だけ。同じ日に同じ企業名の予定が両方にあれば、新しく作らず紐づける
+// - アプリで消すと、作成元が app ならカレンダーからも消す。calendar ならカレンダーには残す
+// - カレンダーで消すと、結果を記録していない予定はアプリからも消す
+// 紐づけの状態は隠しシート「カレンダー同期」に保存する。
+// ---------------------------------------------------------------------------
+
+/** 32bit FNV-1a。内容が変わったかを比べるための短い指紋 */
+function hash_(s) {
+  var h = 0x811c9dc5;
+  s = String(s);
+  for (var i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return ('0000000' + h.toString(16)).slice(-8);
+}
+
+function rowFingerprint_(row) {
+  return hash_(JSON.stringify([row.company, row.type, row.title, row.datetime, row.place, row.memo || '']));
+}
+
+function calFingerprint_(v) {
+  return hash_(JSON.stringify([
+    v.title, v.allDay,
+    v.allDay ? v.startDay : v.start.toISOString(),
+    v.allDay ? v.endDay : v.end.toISOString(),
+    v.location || ''
+  ]));
+}
+
+/** 'yyyy-MM-dd' に日数を足す */
+function addDays_(day, n) {
+  var d = day.split('-');
+  var t = new Date(Date.UTC(+d[0], +d[1] - 1, +d[2] + n));
+  return t.getUTCFullYear() + '-' + pad2_(t.getUTCMonth() + 1) + '-' + pad2_(t.getUTCDate());
+}
+
+function dayDiff_(from, to) {
+  var a = from.split('-');
+  var b = to.split('-');
+  return Math.round((Date.UTC(+b[0], +b[1] - 1, +b[2]) - Date.UTC(+a[0], +a[1] - 1, +a[2])) / DAY_MS);
+}
+
+function jstDayStart_(day) {
+  var d = day.split('-');
+  return jstDate_(+d[0], +d[1], +d[2], 0, 0);
+}
+
+/** カレンダーに出すタイトル。アプリで作った締切は「〆23:59 ソニー 本選考ES」の形 */
+function calendarTitle_(row, origin) {
+  var label = eventLabel_(row);
+  if (origin === 'app' && isDeadlineType_(row.type) && row.datetime) {
+    var p = jstParts_(new Date(row.datetime));
+    label = '〆' + p.h + ':' + pad2_(p.mi) + ' ' + label;
+  }
+  return label;
+}
+
+/** 予定の行を、カレンダーではどう表すか（純粋関数） */
+function calendarTarget_(row, origin, view, settings, company) {
+  var start = new Date(row.datetime);
+  var allDay = view ? view.allDay : isDeadlineType_(row.type);
+  var t = { title: calendarTitle_(row, origin), allDay: allDay, location: row.place || '' };
+  if (allDay) {
+    var days = view && view.allDay ? Math.max(1, dayDiff_(view.startDay, view.endDay)) : 1;
+    t.startDay = jstDayKey_(start);
+    t.endDay = addDays_(t.startDay, days);
+  } else {
+    var dur = view && !view.allDay ? view.end.getTime() - view.start.getTime() : (settings.calendarDuration || 60) * MINUTE_MS;
+    t.start = start;
+    t.end = new Date(start.getTime() + dur);
+  }
+  if (origin === 'app') {
+    var lines = [];
+    if (row.memo) lines.push(row.memo);
+    if (company && company.mypageUrl) lines.push('マイページ: ' + company.mypageUrl);
+    lines.push('（選考管理アプリと同期しています。日時・場所はどちらで変えても反映されます）');
+    t.description = lines.join('\n\n');
+  }
+  return t;
+}
+
+/** カレンダー側の変更を、予定の行のどの項目に反映するか（純粋関数） */
+function pullFields_(view, row, origin) {
+  var f = {};
+  var cur = row.datetime ? new Date(row.datetime) : null;
+  if (view.allDay) {
+    var p = cur ? jstParts_(cur) : null;
+    var deadline = isDeadlineType_(row.type);
+    var d = view.startDay.split('-');
+    var dt = jstDate_(+d[0], +d[1], +d[2], p ? p.h : deadline ? 23 : 9, p ? p.mi : deadline ? 59 : 0);
+    if (!cur || cur.getTime() !== dt.getTime()) f.datetime = dt;
+  } else if (!cur || cur.getTime() !== view.start.getTime()) {
+    f.datetime = view.start;
+  }
+  if ((view.location || '') !== (row.place || '')) f.place = view.location || '';
+  if (origin === 'calendar' && view.title !== row.title) f.title = view.title;
+  return f;
+}
+
+/** タイトルに含まれる登録済みの企業（いちばん長い名前で一致したもの） */
+function matchCompanyInTitle_(title, companies) {
+  var t = normalizeName_(title);
+  var best = null;
+  companies.forEach(function (c) {
+    var n = normalizeName_(c.name);
+    if (n && t.indexOf(n) >= 0 && (!best || n.length > normalizeName_(best.name).length)) best = c;
+  });
+  return best;
+}
+
+/** カレンダーの予定のタイトルから種別を推測する */
+function guessEventType_(title, allDay) {
+  var t = normalizeText_(title);
+  if (/webテスト|ウェブテスト|適性検査|spi|玉手箱|tg-?web|受検/.test(t)) return 'Webテスト締切';
+  if (/(^|[^a-z])es([^a-z]|$)|エントリーシート|志望動機|シート|書類/.test(t) && (allDay || /締切|締め切り|〆|期限|提出/.test(t))) return 'ES締切';
+  if (/(^|[^a-z])gd([^a-z]|$)|グループディスカッション|グループワーク/.test(t)) return 'GD';
+  if (/面接/.test(t)) return '面接';
+  if (/説明会|セミナー|インターン|internship|オープンカンパニー|1day|座談会/.test(t)) return '説明会';
+  return 'その他';
+}
+
+/** カレンダーの予定をアプリに取り込むときの内容 */
+function importFields_(view, companies) {
+  var company = matchCompanyInTitle_(view.title, companies);
+  var type = guessEventType_(view.title, view.allDay);
+  var dt;
+  if (view.allDay) {
+    var d = view.startDay.split('-');
+    var deadline = isDeadlineType_(type);
+    dt = jstDate_(+d[0], +d[1], +d[2], deadline ? 23 : 9, deadline ? 59 : 0);
+  } else {
+    dt = view.start;
+  }
+  return { company: company ? company.name : '', type: type, title: view.title || '（タイトルなし）', datetime: dt, place: view.location || '' };
+}
+
+/** カレンダーから来た文字をセルに書くとき、数式や日付に化けないようにする */
+function textCell_(s) {
+  s = String(s == null ? '' : s);
+  return /^[=+\-@']|^[\d\s\/\-.:年月日時分]+$/.test(s) && s !== '' ? "'" + s : s;
+}
+
+/** 同じ日に同じ企業の予定がアプリにもあれば、それを返す（二重登録を防ぐ） */
+function findDuplicateRow_(view, rows, used) {
+  var vDay = view.allDay ? view.startDay : jstDayKey_(view.start);
+  var vt = normalizeName_(view.title);
+  var loose = null;
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (used[r.id]) continue;
+    var d = new Date(r.datetime);
+    if (jstDayKey_(d) !== vDay) continue;
+    var byName = (r.company && vt.indexOf(normalizeName_(r.company)) >= 0) ||
+      (r.title && normalizeName_(r.title).length >= 2 && vt.indexOf(normalizeName_(r.title)) >= 0);
+    if (!byName) continue;
+    if (view.allDay || Math.abs(view.start.getTime() - d.getTime()) < MINUTE_MS) return r;
+    if (!loose) loose = r;
+  }
+  return loose;
+}
+
+/**
+ * 同期で行う操作の一覧を作る（純粋関数。カレンダーやシートには触れない）。
+ * @param {{rows:Array, views:Array, links:Array, frozen:Object, settings:Object, companies:Array, now:Date}} p
+ */
+function planCalendarSync_(p) {
+  var now = p.now;
+  var tp = jstParts_(now);
+  var todayStart = jstDate_(tp.y, tp.m, tp.d, 0, 0).getTime();
+  var closed = {};
+  p.companies.forEach(function (c) {
+    if (p.settings.closedStatuses.indexOf(c.status) >= 0) closed[normalizeName_(c.name)] = true;
+  });
+  var rowById = {};
+  p.rows.forEach(function (r) { rowById[r.id] = r; });
+  var viewById = {};
+  p.views.forEach(function (v) { viewById[v.id] = v; });
+  var linkByCal = {};
+  var linkByRow = {};
+  p.links.forEach(function (l) {
+    linkByCal[l.calEventId] = l;
+    if (l.rowId) linkByRow[l.rowId] = l;
+  });
+  var actions = [];
+
+  // 1) 紐づいている予定
+  p.links.forEach(function (l) {
+    if (l.state !== 'linked' || (p.frozen && p.frozen[l.calEventId])) return;
+    var row = rowById[l.rowId];
+    var view = viewById[l.calEventId];
+    if (!row) {
+      actions.push({ op: l.origin === 'calendar' ? 'ignore' : 'deleteCal', link: l });
+      return;
+    }
+    if (!view) {
+      actions.push({ op: row.result ? 'detach' : 'deleteRow', link: l, row: row });
+      return;
+    }
+    if (!row.datetime) return;
+    var rowChanged = rowFingerprint_(row) !== l.rowFp;
+    var calChanged = calFingerprint_(view) !== l.calFp;
+    if (!rowChanged && !calChanged) return;
+    if (rowChanged && calChanged) {
+      if ((row.updatedAt ? new Date(row.updatedAt).getTime() : 0) >= view.updated.getTime()) calChanged = false;
+      else rowChanged = false;
+    }
+    actions.push({ op: rowChanged ? 'push' : 'pull', link: l, row: row, view: view });
+  });
+
+  // 2) まだ紐づいていない、今日以降のアプリの予定
+  var unlinkedRows = p.rows.filter(function (r) {
+    return !linkByRow[r.id] && r.datetime && new Date(r.datetime).getTime() >= todayStart &&
+      !r.result && !closed[normalizeName_(r.company)];
+  });
+  var used = {};
+
+  // 3) まだ紐づいていない、今日以降のカレンダーの予定
+  p.views.forEach(function (v) {
+    if (linkByCal[v.id] || v.recurring) return;
+    var startMs = v.allDay ? jstDayStart_(v.startDay).getTime() : v.start.getTime();
+    if (startMs < todayStart) return;
+    var dup = findDuplicateRow_(v, unlinkedRows, used);
+    if (dup) {
+      used[dup.id] = true;
+      actions.push({ op: 'link', row: dup, view: v });
+    } else if (p.settings.calendarImport) {
+      actions.push({ op: 'import', view: v, fields: importFields_(v, p.companies) });
+    }
+  });
+
+  unlinkedRows.forEach(function (r) {
+    if (!used[r.id]) actions.push({ op: 'create', row: r });
+  });
+  return actions;
+}
+
+// ---------- ここから下はカレンダー・シートを実際に操作する ----------
+
+function calendarView_(ev) {
+  var tz = Session.getScriptTimeZone();
+  var allDay = ev.isAllDayEvent();
+  var v = {
+    id: ev.getId(),
+    title: String(ev.getTitle() || '').trim(),
+    allDay: allDay,
+    location: String(ev.getLocation() || '').trim(),
+    updated: ev.getLastUpdated(),
+    recurring: ev.isRecurringEvent()
+  };
+  if (allDay) {
+    v.startDay = Utilities.formatDate(ev.getAllDayStartDate(), tz, 'yyyy-MM-dd');
+    v.endDay = Utilities.formatDate(ev.getAllDayEndDate(), tz, 'yyyy-MM-dd');
+  } else {
+    v.start = ev.getStartTime();
+    v.end = ev.getEndTime();
+  }
+  return v;
+}
+
+function calendarDay_(day) {
+  return Utilities.parseDate(day, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+}
+
+function createCalendarEvent_(cal, t) {
+  var opts = { location: t.location || '', description: t.description || '' };
+  if (t.allDay) {
+    if (dayDiff_(t.startDay, t.endDay) > 1) return cal.createAllDayEvent(t.title, calendarDay_(t.startDay), calendarDay_(t.endDay), opts);
+    return cal.createAllDayEvent(t.title, calendarDay_(t.startDay), opts);
+  }
+  return cal.createEvent(t.title, t.start, t.end, opts);
+}
+
+function updateCalendarEvent_(ev, t, view) {
+  if (view.title !== t.title) ev.setTitle(t.title);
+  if ((view.location || '') !== t.location) ev.setLocation(t.location);
+  if (t.description !== undefined && String(ev.getDescription() || '') !== t.description) ev.setDescription(t.description);
+  if (t.allDay) {
+    if (view.startDay !== t.startDay || view.endDay !== t.endDay) {
+      if (dayDiff_(t.startDay, t.endDay) > 1) ev.setAllDayDates(calendarDay_(t.startDay), calendarDay_(t.endDay));
+      else ev.setAllDayDate(calendarDay_(t.startDay));
+    }
+  } else if (view.start.getTime() !== t.start.getTime() || view.end.getTime() !== t.end.getTime()) {
+    ev.setTime(t.start, t.end);
+  }
+}
+
+function readCalendarLinks_() {
+  var t = readTable_(SHEETS.calsync);
+  return {
+    table: t,
+    links: t.rows.filter(function (r) { return str_(r.calEventId) !== ''; }).map(function (r) {
+      return {
+        _row: r._row,
+        calEventId: str_(r.calEventId),
+        rowId: str_(r.rowId),
+        origin: str_(r.origin) || 'app',
+        rowFp: str_(r.rowFp),
+        calFp: str_(r.calFp),
+        state: str_(r.state) || 'linked'
+      };
+    })
+  };
+}
+
+function clearCalendarLinks_() {
+  var t = readTable_(SHEETS.calsync);
+  if (t.rows.length) t.sheet.deleteRows(2, t.sheet.getLastRow() - 1);
+}
+
+/**
+ * カレンダーと同期する。
+ * @param {{calendarId?:string, importOn?:boolean, dryRun?:boolean}=} opt
+ * @return {Object|null} 操作ごとの件数と例
+ */
+function syncCalendar_(opt) {
+  opt = opt || {};
+  var settings = readSettings_();
+  var calId = opt.calendarId || settings.calendarId;
+  if (!calId) return null;
+  if (opt.importOn !== undefined) settings.calendarImport = !!opt.importOn;
+  var cal = CalendarApp.getCalendarById(calId);
+  if (!cal) throw new Error('カレンダーが見つかりません。このアカウントにカレンダーが共有されているか確認してください（ID: ' + calId + '）');
+
+  var props = PropertiesService.getScriptProperties();
+  if (!opt.dryRun && props.getProperty('CAL_LINKED_ID') !== calId) {
+    // 別のカレンダーに切り替えたら、前の紐づけは使わない
+    clearCalendarLinks_();
+    props.setProperty('CAL_LINKED_ID', calId);
+  }
+
+  var now = new Date();
+  var tp = jstParts_(now);
+  var todayStart = jstDate_(tp.y, tp.m, tp.d, 0, 0).getTime();
+  var companies = readCompanies_();
+  var rows = readEvents_(indexByName_(companies));
+  var linkData = readCalendarLinks_();
+  var links = props.getProperty('CAL_LINKED_ID') === calId ? linkData.links : [];
+
+  var evObjs = {};
+  var views = [];
+  var from = new Date(todayStart - 31 * DAY_MS);
+  var to = new Date(todayStart + 400 * DAY_MS);
+  cal.getEvents(from, to).forEach(function (ev) {
+    var v = calendarView_(ev);
+    if (evObjs[v.id]) return; // 繰り返し予定は同じ ID が並ぶ
+    evObjs[v.id] = ev;
+    views.push(v);
+  });
+
+  // 取得範囲の外に動いた予定を探す（範囲内なのに見つからなければ削除されたとみなす）
+  var rowById = {};
+  rows.forEach(function (r) { rowById[r.id] = r; });
+  var frozen = {};
+  links.forEach(function (l) {
+    if (l.state !== 'linked' || evObjs[l.calEventId]) return;
+    var row = rowById[l.rowId];
+    if (row && row.datetime && new Date(row.datetime).getTime() < todayStart - 30 * DAY_MS) {
+      frozen[l.calEventId] = true;
+      return;
+    }
+    var ev = null;
+    try {
+      ev = cal.getEventById(l.calEventId);
+    } catch (e) {
+      ev = null;
+    }
+    if (!ev) return;
+    var v = calendarView_(ev);
+    var s = v.allDay ? jstDayStart_(v.startDay) : v.start;
+    if (s >= from && s < to) return; // 範囲内なのに一覧に無い＝削除済み
+    evObjs[v.id] = ev;
+    views.push(v);
+  });
+
+  var actions = planCalendarSync_({ rows: rows, views: views, links: links, frozen: frozen, settings: settings, companies: companies, now: now });
+  if (!opt.dryRun) applyCalendarActions_(actions, { cal: cal, evObjs: evObjs, linkTable: linkData.table, settings: settings, companies: companies, now: now });
+  return summarizeCalendarActions_(actions);
+}
+
+function summarizeCalendarActions_(actions) {
+  var out = { create: 0, import: 0, link: 0, push: 0, pull: 0, deleteCal: 0, deleteRow: 0, ignore: 0, detach: 0, samples: { create: [], import: [], link: [] } };
+  actions.forEach(function (a) {
+    out[a.op]++;
+    if (out.samples[a.op] && out.samples[a.op].length < 8) {
+      var title = a.op === 'import' ? a.view.title : eventLabel_(a.row);
+      var when = a.op === 'import'
+        ? (a.view.allDay ? a.view.startDay.slice(5).replace('-', '/') + ' 終日' : formatJst_(a.view.start))
+        : formatJst_(new Date(a.row.datetime));
+      out.samples[a.op].push(when + '　' + title);
+    }
+  });
+  return out;
+}
+
+function applyCalendarActions_(actions, ctx) {
+  if (!actions.length) return;
+  var now = ctx.now;
+  var evTable = readTable_(SHEETS.events);
+  var rowNum = {};
+  evTable.rows.forEach(function (r) { rowNum[str_(r.id)] = r._row; });
+  var companyByName = indexByName_(ctx.companies);
+  var deleteEventRows = [];
+  var deleteLinkRows = [];
+  var errors = [];
+
+  var addLink = function (fields) {
+    fields.syncedAt = now;
+    appendFields_(ctx.linkTable, fields);
+  };
+  var updateLink = function (link, fields) {
+    fields.syncedAt = now;
+    writeFields_(ctx.linkTable, link._row, fields);
+  };
+
+  actions.forEach(function (a) {
+    try {
+      var ev, target, v;
+      if (a.op === 'create') {
+        target = calendarTarget_(a.row, 'app', null, ctx.settings, companyByName[normalizeName_(a.row.company)]);
+        v = calendarView_(createCalendarEvent_(ctx.cal, target));
+        addLink({ calEventId: v.id, rowId: a.row.id, origin: 'app', rowFp: rowFingerprint_(a.row), calFp: calFingerprint_(v), state: 'linked' });
+      } else if (a.op === 'push') {
+        ev = ctx.evObjs[a.view.id];
+        target = calendarTarget_(a.row, a.link.origin, a.view, ctx.settings, companyByName[normalizeName_(a.row.company)]);
+        updateCalendarEvent_(ev, target, a.view);
+        updateLink(a.link, { rowFp: rowFingerprint_(a.row), calFp: calFingerprint_(calendarView_(ev)) });
+      } else if (a.op === 'pull') {
+        var fields = pullFields_(a.view, a.row, a.link.origin);
+        var merged = {};
+        Object.keys(a.row).forEach(function (k) { merged[k] = a.row[k]; });
+        if (Object.keys(fields).length) {
+          Object.keys(fields).forEach(function (k) {
+            merged[k] = isDate_(fields[k]) ? fields[k].toISOString() : fields[k];
+            if (typeof fields[k] === 'string') fields[k] = textCell_(fields[k]);
+          });
+          fields.updatedAt = now;
+          writeFields_(evTable, rowNum[a.row.id], fields);
+        }
+        updateLink(a.link, { rowFp: rowFingerprint_(merged), calFp: calFingerprint_(a.view) });
+      } else if (a.op === 'link') {
+        addLink({ calEventId: a.view.id, rowId: a.row.id, origin: 'calendar', rowFp: rowFingerprint_(a.row), calFp: calFingerprint_(a.view), state: 'linked' });
+      } else if (a.op === 'import') {
+        var f = a.fields;
+        var id = newId_(SHEETS.events.idPrefix);
+        appendFields_(evTable, { id: id, company: f.company, type: f.type, title: textCell_(f.title), datetime: f.datetime, place: textCell_(f.place), done: false, updatedAt: now });
+        var row = { company: f.company, type: f.type, title: f.title, datetime: f.datetime.toISOString(), place: f.place, memo: '' };
+        addLink({ calEventId: a.view.id, rowId: id, origin: 'calendar', rowFp: rowFingerprint_(row), calFp: calFingerprint_(a.view), state: 'linked' });
+      } else if (a.op === 'deleteCal') {
+        ev = ctx.evObjs[a.link.calEventId] || ctx.cal.getEventById(a.link.calEventId);
+        if (ev) ev.deleteEvent();
+        deleteLinkRows.push(a.link._row);
+      } else if (a.op === 'ignore') {
+        updateLink(a.link, { state: 'ignored', rowId: '' });
+      } else if (a.op === 'deleteRow') {
+        if (rowNum[a.row.id]) deleteEventRows.push(rowNum[a.row.id]);
+        deleteLinkRows.push(a.link._row);
+      } else if (a.op === 'detach') {
+        updateLink(a.link, { state: 'ignored' });
+      }
+    } catch (e) {
+      errors.push(a.op + ': ' + e.message);
+    }
+  });
+
+  deleteEventRows.sort(function (x, y) { return y - x; }).forEach(function (r) { evTable.sheet.deleteRow(r); });
+  deleteLinkRows.sort(function (x, y) { return y - x; }).forEach(function (r) { ctx.linkTable.sheet.deleteRow(r); });
+  if (errors.length) throw new Error('カレンダー同期で一部失敗しました: ' + errors.slice(0, 3).join(' / '));
+}
+
+/** API や定期実行から呼ぶ。失敗しても他の処理は止めず、エラーはアプリに表示する。 */
+function syncCalendarSafe_() {
+  var props = PropertiesService.getScriptProperties();
+  try {
+    var r = syncCalendar_();
+    props.setProperty('CAL_LAST_ERROR', '');
+    return r;
+  } catch (e) {
+    props.setProperty('CAL_LAST_ERROR', String(e.message || e).slice(0, 300));
+    Logger.log('カレンダー同期でエラー: ' + e);
+    return null;
+  }
+}
+
+function setSetting_(key, value) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ensureSettingsSheet_(ss);
+  var def = SETTING_DEFS.filter(function (d) { return d.key === key; })[0];
+  var labels = sh.getRange(2, 1, Math.max(sh.getLastRow() - 1, 1), 1).getValues();
+  for (var i = 0; i < labels.length; i++) {
+    if (String(labels[i][0]).trim() === def.label) {
+      sh.getRange(i + 2, 2).setValue(value);
+      return;
+    }
+  }
+  sh.appendRow([def.label, value, def.note]);
+}
+
+// ---------- メニュー「Google カレンダーと連携する」 ----------
+
+function showCalendarDialog() {
+  var t = HtmlService.createTemplate(CALENDAR_DIALOG_HTML);
+  t.info = JSON.stringify(getCalendarDialogInfo());
+  SpreadsheetApp.getUi().showModalDialog(t.evaluate().setWidth(500).setHeight(620), 'Google カレンダーと連携');
+}
+
+function getCalendarDialogInfo() {
+  var s = readSettings_();
+  var cals = CalendarApp.getAllCalendars().filter(function (c) {
+    return !/#holiday@|#contacts@|#weeknum@|@import\.calendar\.google\.com$/.test(c.getId());
+  }).map(function (c) {
+    return { id: c.getId(), name: c.getName() };
+  });
+  return { calendars: cals, current: s.calendarId, importOn: s.calendarImport };
+}
+
+/** ダイアログから呼ばれる。実際には変更せず、何が起きるかだけ返す。 */
+function previewCalendarSync(calId, importOn) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(25000);
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var r = syncCalendar_({ calendarId: calId, importOn: importOn, dryRun: true });
+    if (props.getProperty('CAL_LINKED_ID') !== calId) r.switching = true;
+    return r;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** ダイアログから呼ばれる。連携を開始して 1 回同期する。 */
+function startCalendarSync(calId, importOn) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(25000);
+  try {
+    var cal = CalendarApp.getCalendarById(calId);
+    if (!cal) throw new Error('カレンダーが見つかりません');
+    setSetting_('calendarId', calId);
+    setSetting_('calendarImport', importOn ? 'ON' : 'OFF');
+    PropertiesService.getScriptProperties().setProperty('CAL_NAME', cal.getName());
+    var r = syncCalendar_({ calendarId: calId, importOn: importOn });
+    PropertiesService.getScriptProperties().setProperty('CAL_LAST_ERROR', '');
+    return r;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** ダイアログから呼ばれる。連携をやめる（カレンダーの予定・アプリの予定は消さない）。 */
+function stopCalendarSync() {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(25000);
+  try {
+    setSetting_('calendarId', '');
+    clearCalendarLinks_();
+    var props = PropertiesService.getScriptProperties();
+    props.setProperty('CAL_LINKED_ID', '');
+    props.setProperty('CAL_LAST_ERROR', '');
+    return true;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+var CALENDAR_DIALOG_HTML = [
+  '<!doctype html><html><head><base target="_top"><meta charset="utf-8">',
+  '<style>',
+  'body{font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;font-size:13px;color:#1f2937;margin:0;padding:4px 8px}',
+  'h3{font-size:14px;margin:14px 0 6px}label.cal{display:block;padding:7px 8px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:6px;cursor:pointer}',
+  'label.cal:hover{background:#f5f3ff}button{background:#4f46e5;color:#fff;border:0;border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer;margin:8px 6px 0 0}',
+  'button.sub{background:#e0e7ff;color:#3730a3}button.danger{background:#fee2e2;color:#b91c1c}button:disabled{opacity:.5}',
+  '.note{color:#64748b;font-size:12px;line-height:1.6}.err{color:#dc2626;margin-top:8px}.box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;margin-top:10px}',
+  'ul{margin:4px 0 0;padding-left:18px}li{margin:2px 0}',
+  '</style></head><body>',
+  '<h3>1. 同期するカレンダー</h3><div id="list"></div>',
+  '<label style="display:block;margin-top:8px"><input type="checkbox" id="imp"> カレンダーに直接入れた予定もアプリに取り込む（双方向）</label>',
+  '<div class="note">同期するのは今日以降の予定です。両方にある同じ予定（同じ日・同じ企業名）は二重に作らず紐づけます。</div>',
+  '<button id="pv" onclick="preview()">2. 何が変わるか確認する</button>',
+  '<div id="busy" class="note"></div><div id="err" class="err"></div>',
+  '<div id="out" class="box" style="display:none"></div>',
+  '<button id="go" style="display:none" onclick="start()">3. この内容で連携を開始</button>',
+  '<div id="stopbox" style="display:none;margin-top:14px"><div class="note">連携をやめても、カレンダーとアプリの予定はどちらも消えません。</div>',
+  '<button class="danger" onclick="stop()">連携をやめる</button></div>',
+  '<script>',
+  'var info = <?!= info ?>;',
+  'function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c];});}',
+  'document.getElementById("list").innerHTML = info.calendars.map(function(c){',
+  '  return "<label class=\\"cal\\"><input type=\\"radio\\" name=\\"cal\\" value=\\"" + esc(c.id) + "\\"" + (c.id === info.current ? " checked" : "") + "> " + esc(c.name) + "</label>";',
+  '}).join("") || "<div class=\\"note\\">カレンダーが見つかりません</div>";',
+  'document.getElementById("imp").checked = info.importOn !== false;',
+  'if (info.current) document.getElementById("stopbox").style.display = "block";',
+  'function sel(){var r = document.querySelector("input[name=cal]:checked"); return r ? r.value : "";}',
+  'function busy(t){document.getElementById("busy").textContent = t || ""; document.getElementById("pv").disabled = !!t; document.getElementById("go").disabled = !!t;}',
+  'function fail(e){busy(""); document.getElementById("err").textContent = e.message;}',
+  'function list(title, arr, n){ if (!n) return ""; return "<div style=\\"margin-top:6px\\"><b>" + title + "：" + n + "件</b><ul>" + arr.map(function(s){return "<li>" + esc(s) + "</li>";}).join("") + (n > arr.length ? "<li>ほか" + (n - arr.length) + "件</li>" : "") + "</ul></div>"; }',
+  'function show(r, done){',
+  '  var h = done ? "<b>✅ 連携しました</b>" : "<b>連携を開始すると次のようになります</b>";',
+  '  if (r.switching && !done) h += "<div class=\\"note\\">※ 前の紐づけはリセットされます。</div>";',
+  '  h += list("カレンダーからアプリに取り込む", r.samples["import"], r["import"]);',
+  '  h += list("アプリからカレンダーに追加する", r.samples.create, r.create);',
+  '  h += list("両方にある予定として紐づける", r.samples.link, r.link);',
+  '  if (!r["import"] && !r.create && !r.link) h += "<div style=\\"margin-top:6px\\">新しく取り込む・追加する予定はありません。</div>";',
+  '  if (done) h += "<div class=\\"note\\" style=\\"margin-top:8px\\">これからは 5 分おきに自動で同期します。アプリで保存したときもすぐ反映します。</div>";',
+  '  var o = document.getElementById("out"); o.innerHTML = h; o.style.display = "block";',
+  '}',
+  'function preview(){',
+  '  var id = sel(); document.getElementById("err").textContent = ""; document.getElementById("go").style.display = "none";',
+  '  if (!id) { document.getElementById("err").textContent = "カレンダーを選んでください"; return; }',
+  '  busy("カレンダーを読み込んでいます…");',
+  '  google.script.run.withFailureHandler(fail).withSuccessHandler(function(r){ busy(""); show(r, false); document.getElementById("go").style.display = "inline-block"; })',
+  '    .previewCalendarSync(id, document.getElementById("imp").checked);',
+  '}',
+  'function start(){',
+  '  busy("同期しています…（件数が多いと 1 分ほどかかります）");',
+  '  google.script.run.withFailureHandler(fail).withSuccessHandler(function(r){ busy(""); show(r, true); document.getElementById("go").style.display = "none"; document.getElementById("stopbox").style.display = "block"; })',
+  '    .startCalendarSync(sel(), document.getElementById("imp").checked);',
+  '}',
+  'function stop(){',
+  '  if (!confirm("カレンダー連携をやめますか？（予定は消えません）")) return;',
+  '  busy("解除しています…");',
+  '  google.script.run.withFailureHandler(fail).withSuccessHandler(function(){ busy(""); document.getElementById("out").innerHTML = "連携をやめました。"; document.getElementById("out").style.display = "block"; document.getElementById("stopbox").style.display = "none"; }).stopCalendarSync();',
+  '}',
+  '</script></body></html>'
+].join('\n');

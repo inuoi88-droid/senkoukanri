@@ -54,6 +54,15 @@ function resultChip(ev) {
   return '';
 }
 
+/** 「IBM　三次面接」。タイトルに企業名が入っていれば企業名は重ねない */
+export function eventName(ev, showCompany = true) {
+  const title = ev.title || ev.type;
+  if (!showCompany || !ev.company || normalizeName(title).includes(normalizeName(ev.company))) return title;
+  return `${ev.company}　${title}`;
+}
+
+const calMark = (ev) => (ev.calendar ? html` <span class="chip blue" title="Google カレンダーと同期中">📅</span>` : '');
+
 function countdownEl(d, now) {
   const c = countdown(d, now);
   return html`<span class="countdown ${c.cls}">${c.text}</span>`;
@@ -71,7 +80,7 @@ function eventRow(ev, now, { showCompany = true, onlyTime = false, quick = false
   return html`<div class="item" data-href="#/event/${ev.id}" role="link" tabindex="0">
     <div class="time">${d ? fmtTime(d) : '--:--'}${!onlyTime && d ? html`<small>${dayLabel(d, now)}</small>` : ''}${deadline && d ? html`<small>締切</small>` : ''}</div>
     <div class="main">
-      <div class="title">${showCompany && ev.company ? ev.company + '　' : ''}${ev.title || ev.type}</div>
+      <div class="title">${eventName(ev, showCompany)}${calMark(ev)}</div>
       <div class="sub">${typeChip(ev.type)} ${resultChip(ev)} ${!d && ev.datetimeText ? html`<span class="chip amber">日時を読めません: ${ev.datetimeText}</span>` : ''}${ev.place && !deadline ? ' ' + ev.place : ''}</div>
       ${quick && deadline && !ev.done && future
         ? html`<div class="actions"><button class="btn small soft" data-action="event-done" data-id="${ev.id}">${icons.check} 提出・受験した</button></div>`
@@ -178,7 +187,7 @@ export function homeView(ui) {
   if (missed.length) {
     body.push(section('⚠️ 締切を過ぎた未完了の予定', missed.length));
     body.push(html`<div class="card alert-warn">${missed.map((ev) => html`<div class="item">
-      <div class="main"><div class="title">${ev.company}　${ev.title || ev.type}</div>
+      <div class="main"><div class="title">${eventName(ev)}</div>
       <div class="sub">${fmtDateTime(toDate(ev.datetime))} 締切　提出済みなら「完了」にしてください</div>
       <div class="actions"><button class="btn small soft" data-action="event-done" data-id="${ev.id}">${icons.check} 提出していた</button>
       <a class="btn small ghost" href="#/event/${ev.id}">詳細</a></div></div></div>`)}</div>`);
@@ -191,7 +200,7 @@ export function homeView(ui) {
       const d = toDate(ev.datetime);
       return html`<div class="item">
         <div class="main" data-href="#/event/${ev.id}" role="link" tabindex="0">
-          <div class="title">${ev.company}　${ev.title || ev.type}</div>
+          <div class="title">${eventName(ev)}</div>
           <div class="sub">${typeChip(ev.type)} ${fmtDate(d)}（${countdown(d, now).text}）${ev.resultDue ? '　結果目安 ' + ev.resultDue.slice(5).replace('-', '/') : ''}</div>
           <div class="actions">
             <button class="btn small ok" data-action="event-result" data-id="${ev.id}" data-value="通過">通過</button>
@@ -385,7 +394,7 @@ export function eventView(ui, id) {
 
   const body = html`
     <div class="card hero">
-      <div class="row">${typeChip(ev.type)} ${resultChip(ev)}</div>
+      <div class="row">${typeChip(ev.type)} ${resultChip(ev)} ${ev.calendar ? html`<span class="chip blue">📅 カレンダーと同期中</span>` : ''}</div>
       <h2 style="margin-top:8px">${ev.title || ev.type}</h2>
       <div>${c ? html`<a href="#/company/${c.id}" class="strong">${ev.company}</a>` : html`<span class="strong">${ev.company}</span>`}</div>
       <div style="margin-top:10px;font-size:17px" class="strong">${d ? html`${fmtDateTime(d)}${deadline ? ' 締切' : ''}　${countdownEl(d, now)}` : html`<span class="muted">日時未設定${ev.datetimeText ? '（' + ev.datetimeText + '）' : ''}</span>`}</div>
@@ -472,6 +481,9 @@ export function settingsView(ui) {
     </div>
     <div class="tiny muted" style="margin-top:6px">通知のタイミング（◯日前・◯時間前）や朝のまとめの時刻は、スプレッドシートの「設定」シートで変えられます。</div>
 
+    ${section('Google カレンダー')}
+    ${calendarStatus(S.options().calendar)}
+
     ${section('データ')}
     <div class="card">
       ${data.spreadsheetUrl ? html`<a class="item" href="${data.spreadsheetUrl}" target="_blank" rel="noopener"><div class="main"><div class="title">スプレッドシートを開く</div><div class="sub">直接編集しても OK。アプリには次の同期で反映されます。</div></div>${icons.external}</a>` : ''}
@@ -492,6 +504,20 @@ export function settingsView(ui) {
     </div>
   `;
   return shell(ui, { title: '設定', body, fab: false });
+}
+
+function calendarStatus(cal) {
+  if (cal && cal.on) {
+    return html`<div class="card pad">
+      <div class="strong">📅 「${cal.name || 'カレンダー'}」と同期中</div>
+      <div class="small muted" style="margin-top:4px">アプリで入れた予定はカレンダーに、カレンダーに入れた予定はアプリに 5 分おきに反映されます。日時・場所はどちらで変えても OK です。</div>
+      ${cal.error ? html`<div class="banner danger" style="margin:10px 0 0"><div class="main"><b>同期でエラーが出ています</b>${cal.error}</div></div>` : ''}
+    </div>`;
+  }
+  return html`<div class="card pad small">
+    <div class="strong">カレンダー連携はオフです</div>
+    <div class="muted" style="margin-top:4px">パソコンでスプレッドシートを開き、メニュー「選考管理 → Google カレンダーと連携する」から設定できます。</div>
+  </div>`;
 }
 
 // ---------- 初回接続 ----------
@@ -592,7 +618,8 @@ export function eventForm(ev, preset = {}) {
     <form data-form="event" data-id="${ev ? ev.id : ''}">
       <label class="field"><span>企業<span class="req">*</span></span>
         <select name="company" data-change="event-company-select">
-          ${!curCompany ? html`<option value="" selected disabled>選んでください</option>` : ''}
+          ${!curCompany && !ev ? html`<option value="" selected disabled>選んでください</option>` : ''}
+          <option value="__none__" ${ev && !curCompany ? 'selected' : ''}>（企業なし）</option>
           ${curCompany && !companies.some((c) => c.name === curCompany) ? html`<option selected>${curCompany}</option>` : ''}
           ${companies.map((c) => html`<option ${c.name === curCompany ? 'selected' : ''}>${c.name}</option>`)}
           <option value="__new__">＋ 新しい企業を追加…</option>
@@ -619,7 +646,7 @@ export function eventForm(ev, preset = {}) {
 }
 
 export function resultMenu(ev) {
-  return html`<h3>${ev.company}　${ev.title || ev.type} の結果</h3>
+  return html`<h3>${eventName(ev)} の結果</h3>
     <div class="card menu" style="padding:0 10px">
       ${S.options().results.map((r) => html`<button data-action="event-result" data-id="${ev.id}" data-value="${r}">${r}</button>`)}
     </div>`;

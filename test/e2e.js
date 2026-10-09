@@ -208,6 +208,21 @@ function bootGas() {
   await shot('07-settings');
   step('予定の詳細・一覧・設定画面');
 
+  // 9b) Google カレンダー連携（カレンダーの予定が取り込まれ、📅 が付く）
+  const cal = gas.calendars[0];
+  const in3 = Date.now() + 3 * 86400000;
+  cal.add({ title: 'シンプレクス人事面談', allDay: false, start: in3, end: in3 + 3600000 });
+  gas.ctx.startCalendarSync(cal.id, true);
+  await page.goto(base + '#/events');
+  await page.click('[data-action="refresh"]');
+  await page.waitForSelector('.item:has-text("シンプレクス人事面談")');
+  assert.ok(await page.$('.item:has-text("三次面接") .chip.blue'), '同期中の予定に 📅 が付く');
+  assert.ok(cal.events.some((e) => /三次面接/.test(e.title)), 'アプリの予定がカレンダーに入る');
+  await shot('06b-events-calendar');
+  await page.goto(base + '#/settings');
+  await page.waitForSelector('text=と同期中');
+  step('Google カレンダー連携（取り込み・追加・表示）');
+
   // 10) 企業名の変更が予定にも反映される
   const cid = gas.ss.getSheetByName('企業').objects().find((r) => r['企業名'] === '日本IBM')['ID'];
   await page.goto(base + '#/company/' + cid);
