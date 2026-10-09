@@ -51,13 +51,13 @@ Google スプレッドシート（データ）              Gmail（就活用ア
 
 1. スプレッドシートのメニュー **拡張機能 → Apps Script** を開く
 2. 下のリンクを開き、**Ctrl+A（Mac は ⌘+A）で全選択 → Ctrl+C でコピー**
-   - [Code.gs（2343 行）](https://raw.githubusercontent.com/inuoi88-droid/senkoukanri/claude/upbeat-volta-x50awh/gas/Code.gs)
+   - [Code.gs（2357 行）](https://raw.githubusercontent.com/inuoi88-droid/senkoukanri/claude/upbeat-volta-x50awh/gas/Code.gs)
 3. Apps Script の `コード.gs` の中身を Ctrl+A で全選択して消し、Ctrl+V で貼り付ける
 4. 左の「ファイル」の **＋ → スクリプト** で `WebPush` という名前のファイルを作り、中身を消してから同じように貼り付ける
    - [WebPush.gs（599 行）](https://raw.githubusercontent.com/inuoi88-droid/senkoukanri/claude/upbeat-volta-x50awh/gas/WebPush.gs)
 5. 💾（保存）を押す
 
-> **手で打ち込んだり、画面に見えている部分だけを選択したりしないでください。** 途中までしか貼れていないと「SyntaxError: Unexpected end of input」と出ます。貼り付け後、エディタの一番下までスクロールして、`コード.gs` が 2343 行目、`WebPush.gs` が 599 行目で終わっていれば OK です。
+> **手で打ち込んだり、画面に見えている部分だけを選択したりしないでください。** 途中までしか貼れていないと「SyntaxError: Unexpected end of input」と出ます。貼り付け後、エディタの一番下までスクロールして、`コード.gs` が 2357 行目、`WebPush.gs` が 599 行目で終わっていれば OK です。
 
 ### 3. 初期設定を実行する
 

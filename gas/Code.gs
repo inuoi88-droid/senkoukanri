@@ -2028,11 +2028,24 @@ function clearCalendarLinks_() {
 }
 
 /**
+ * 古いコードが別ファイルや同じファイルの後ろに残っていると、新しい設定・シート定義が上書きされてしまう。
+ * カレンダー連携の入口でそれを見つけて、分かりやすく知らせる。
+ */
+function assertLatestCode_() {
+  var ok = SHEETS.calsync && SETTING_DEFS.some(function (d) { return d.key === 'calendarId'; });
+  if (!ok) {
+    throw new Error('古いコードが残っています。Apps Script の左の「ファイル」が「コード.gs」と「WebPush.gs」の 2 つだけで、' +
+      '「コード.gs」の中身が最新の全文 1 回分だけ（一番下が 2357 行目）になっているか確認してください。');
+  }
+}
+
+/**
  * カレンダーと同期する。
  * @param {{calendarId?:string, importOn?:boolean, dryRun?:boolean}=} opt
  * @return {Object|null} 操作ごとの件数と例
  */
 function syncCalendar_(opt) {
+  assertLatestCode_();
   opt = opt || {};
   var settings = readSettings_();
   var calId = opt.calendarId || settings.calendarId;
@@ -2224,6 +2237,7 @@ function showCalendarDialog() {
 }
 
 function getCalendarDialogInfo() {
+  assertLatestCode_();
   var s = readSettings_();
   var cals = CalendarApp.getAllCalendars().filter(function (c) {
     return !/#holiday@|#contacts@|#weeknum@|@import\.calendar\.google\.com$/.test(c.getId());
